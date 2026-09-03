@@ -154,6 +154,61 @@ Test-Case "sync rejects activation content that differs from the pinned agent co
     }
 }
 
+Test-Case "sync rejects activation paths that traverse a junction outside the workspace" {
+    $sandbox = New-MaterializationSandbox
+    $outside = Join-Path $temporaryRoot ("tsfg-materialization-outside-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        Set-Content -LiteralPath (Join-Path $outside "config.toml") -Value "outside config" -Encoding utf8NoBOM
+        New-Item -ItemType Junction -Path (Join-Path $sandbox ".codex") -Target $outside | Out-Null
+
+        $result = Invoke-SandboxSync -Sandbox $sandbox
+        if ($result.ExitCode -eq 0) {
+            throw "sync accepted an activation path through an out-of-workspace junction"
+        }
+        if ($result.Output -notmatch "reparse point") {
+            throw "sync did not report the physical containment failure: $($result.Output)"
+        }
+        if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
+            throw "sync invoked repo before rejecting the junction escape"
+        }
+    }
+    finally {
+        Remove-MaterializationSandbox -Path $sandbox
+        if (Test-Path -LiteralPath $outside) {
+            Remove-Item -LiteralPath $outside -Recurse -Force
+        }
+    }
+}
+
+Test-Case "sync rejects a broken reparse-point conflict before invoking repo" {
+    $sandbox = New-MaterializationSandbox
+    $outside = Join-Path $temporaryRoot ("tsfg-materialization-broken-" + [guid]::NewGuid().ToString("N"))
+    $destination = Join-Path $sandbox "AGENTS.md"
+    try {
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        New-Item -ItemType Junction -Path $destination -Target $outside | Out-Null
+        Remove-Item -LiteralPath $outside -Recurse -Force
+
+        $result = Invoke-SandboxSync -Sandbox $sandbox
+        if ($result.ExitCode -eq 0) {
+            throw "sync accepted a broken reparse-point conflict"
+        }
+        if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
+            throw "sync invoked repo before rejecting the broken conflict"
+        }
+    }
+    finally {
+        if ((Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $destination -Force
+        }
+        Remove-MaterializationSandbox -Path $sandbox
+        if (Test-Path -LiteralPath $outside) {
+            Remove-Item -LiteralPath $outside -Recurse -Force
+        }
+    }
+}
+
 Write-Host "$passed passed, $failed failed"
 if ($failed -ne 0) {
     exit 1

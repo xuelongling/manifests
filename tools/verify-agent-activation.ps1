@@ -47,6 +47,16 @@ if ($null -eq $agentProject -or $agentRevision -notmatch '^[0-9a-f]{40}$') {
     Stop-Activation "cannot identify the pinned .agents commit in bootstrap/r00.xml"
 }
 
+foreach ($relativeDirectory in @(".agents", ".agents/codex", ".codex")) {
+    $directory = Get-CanonicalPath (Join-Path $workspace $relativeDirectory)
+    $directoryItem = Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+    if ($null -ne $directoryItem) {
+        if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            Stop-Activation "path traverses a reparse point and may escape the Repo Workspace: $relativeDirectory"
+        }
+    }
+}
+
 foreach ($mapping in $mappings) {
     $destination = Get-CanonicalPath (Join-Path $workspace $mapping.Destination)
     $source = Get-CanonicalPath (Join-Path $workspace $mapping.Source)
@@ -56,7 +66,8 @@ foreach ($mapping in $mappings) {
         Stop-Activation "mapping escapes the Repo Workspace: $($mapping.Destination)"
     }
 
-    if (-not (Test-Path -LiteralPath $destination)) {
+    $item = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
         if ($Phase -eq "pre") {
             continue
         }
@@ -77,7 +88,6 @@ foreach ($mapping in $mappings) {
         Stop-Activation "content does not match the pinned agent commit: $($mapping.Source)"
     }
 
-    $item = Get-Item -LiteralPath $destination -Force
     $linkType = $item.PSObject.Properties["LinkType"]
     $linkTarget = $item.PSObject.Properties["Target"]
     if ($null -eq $linkType -or $linkType.Value -ne "SymbolicLink" -or

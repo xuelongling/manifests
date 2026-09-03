@@ -162,6 +162,19 @@ There is intentionally no `default.xml` before the first Stable Integration.
 The bootstrap identity is independently replayable but does not claim to be a
 Stable Integration.
 
+Maintainers can replay the same public `init`/`sync` seam on a link-capable
+Linux host and verify the resulting repository state with the versioned
+integration test:
+
+```sh
+TSFG_REPO_LAUNCHER=/path/to/verified/repo-2.65 \
+  bash tests/bootstrap-materialization.integration.tests.sh
+```
+
+For an already materialized evidence workspace, pass `--workspace <path>` to
+rerun the state assertions without performing another network sync. This test
+does not replace the later `tsfg-build verify-workspace` command.
+
 The wrapper refuses `--no-verify`, `--no-repo-verify`, and every unique long-option
 abbreviation that repo would accept for either switch, with exit code 2 before
 the launcher runs. The `repo sync --verify` option only selects non-interactive
