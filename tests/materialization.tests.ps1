@@ -209,6 +209,35 @@ Test-Case "sync rejects a broken reparse-point conflict before invoking repo" {
     }
 }
 
+Test-Case "sync rejects a managed source leaf linked to outside the workspace" {
+    $sandbox = New-MaterializationSandbox
+    $outside = Join-Path $temporaryRoot ("tsfg-materialization-source-" + [guid]::NewGuid().ToString("N") + ".md")
+    try {
+        $source = Join-Path $sandbox ".agents/AGENTS.md"
+        Copy-Item -LiteralPath $source -Destination $outside
+        Remove-Item -LiteralPath $source -Force
+        New-Item -ItemType HardLink -Path $source -Target $outside | Out-Null
+        Copy-Item -LiteralPath $source -Destination (Join-Path $sandbox "AGENTS.md")
+
+        $result = Invoke-SandboxSync -Sandbox $sandbox
+        if ($result.ExitCode -eq 0) {
+            throw "sync accepted a managed source leaf linked outside the workspace"
+        }
+        if ($result.Output -notmatch "managed source must be an ordinary file") {
+            throw "sync did not report the source-link containment failure: $($result.Output)"
+        }
+        if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
+            throw "sync invoked repo before rejecting the linked managed source"
+        }
+    }
+    finally {
+        Remove-MaterializationSandbox -Path $sandbox
+        if (Test-Path -LiteralPath $outside) {
+            Remove-Item -LiteralPath $outside -Force
+        }
+    }
+}
+
 Write-Host "$passed passed, $failed failed"
 if ($failed -ne 0) {
     exit 1

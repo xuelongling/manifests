@@ -77,6 +77,12 @@ foreach ($mapping in $mappings) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         Stop-Activation "managed source is missing: $($mapping.Source)"
     }
+    $sourceItem = Get-Item -LiteralPath $source -Force
+    $sourceLinkType = $sourceItem.PSObject.Properties["LinkType"]
+    if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($null -ne $sourceLinkType -and -not [string]::IsNullOrEmpty([string] $sourceLinkType.Value))) {
+        Stop-Activation "managed source must be an ordinary file inside the Repo Workspace: $($mapping.Source)"
+    }
 
     $projectPath = $mapping.Source.Substring(".agents/".Length)
     $expectedBlob = (& git -C $agentRoot rev-parse "$($agentRevision):$projectPath" 2>&1 | Out-String).Trim()
