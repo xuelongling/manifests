@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-manifest_oid="c0ea4bb1d32f80cea00d852fe6e36950e2aee598"
+manifest_oid="d94f4e6bff9aa980b18b0df94e133559e4b61240"
 tsfg_oid="eb2838e4c4910113b23072b40c526a8b2843f744"
 agents_oid="20e5cb5e50c38c5a6fde9ed9b7875f9b405648e4"
 workspace=""

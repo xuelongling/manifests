@@ -86,7 +86,7 @@ Test-Case "README documents wrapper defaults and the materialization boundary" {
         '--no-verify',
         '--no-repo-verify',
         'https://github.com/xuelongling/manifests.git',
-        '-b c0ea4bb1d32f80cea00d852fe6e36950e2aee598',
+        '-b d94f4e6bff9aa980b18b0df94e133559e4b61240',
         '-m bootstrap/r00.xml',
         'Workspace Verification'
     )) {

@@ -111,7 +111,7 @@ Test-Case "bootstrap manifest declares the complete R00 workspace" {
 
 Test-Case "README publishes one replayable Bootstrap Integration Snapshot" {
     $readme = Get-Content -LiteralPath (Join-Path $repoRoot "README.md") -Raw
-    $snapshotOid = "c0ea4bb1d32f80cea00d852fe6e36950e2aee598"
+    $snapshotOid = "d94f4e6bff9aa980b18b0df94e133559e4b61240"
 
     foreach ($required in @(
         "https://github.com/xuelongling/manifests.git",
