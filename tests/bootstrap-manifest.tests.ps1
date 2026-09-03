@@ -81,6 +81,15 @@ Test-Case "bootstrap manifest declares the complete R00 workspace" {
         if (@($project.SelectNodes("copyfile")).Count -ne 0) {
             throw "copyfile fallback is forbidden"
         }
+        if ($project.path -ne ".agents" -and @($project.SelectNodes("linkfile")).Count -ne 0) {
+            throw "only .agents may expose manifest-managed linkfiles"
+        }
+    }
+
+    foreach ($forbiddenElement in @("copyfile", "extend-project", "include", "remove-project", "submanifest")) {
+        if (@($root.SelectNodes(".//$forbiddenElement")).Count -ne 0) {
+            throw "$forbiddenElement may not alter the Bootstrap Integration Snapshot"
+        }
     }
 
     $agentProject = @($projects | Where-Object path -eq ".agents")
@@ -97,6 +106,45 @@ Test-Case "bootstrap manifest declares the complete R00 workspace" {
 
     if (Test-Path -LiteralPath (Join-Path $repoRoot "default.xml")) {
         throw "default.xml must not exist before the first Stable Integration"
+    }
+}
+
+Test-Case "README publishes one replayable Bootstrap Integration Snapshot" {
+    $readme = Get-Content -LiteralPath (Join-Path $repoRoot "README.md") -Raw
+    $snapshotOid = "c0ea4bb1d32f80cea00d852fe6e36950e2aee598"
+
+    foreach ($required in @(
+        "https://github.com/xuelongling/manifests.git",
+        "-b $snapshotOid",
+        "-m bootstrap/r00.xml",
+        "--repo-rev=v2.65",
+        "Repo Workspace",
+        "Agent Activation Surface",
+        "repo sync --verify",
+        "project OID verification",
+        "does not verify the Agent Activation Surface"
+    )) {
+        if (-not $readme.Contains($required, [System.StringComparison]::Ordinal)) {
+            throw "README is missing the bootstrap identity/materialization statement: $required"
+        }
+    }
+
+    if ($readme.Contains("<full-manifest-commit-oid>", [System.StringComparison]::Ordinal)) {
+        throw "README must not retain an executable bootstrap identity placeholder"
+    }
+
+    $snapshotBlob = (& git -C $repoRoot rev-parse "$($snapshotOid):bootstrap/r00.xml" 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "published manifest commit does not contain bootstrap/r00.xml: $snapshotBlob"
+    }
+    $workingBlob = (& git -C $repoRoot hash-object $manifestPath 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $workingBlob -ne $snapshotBlob) {
+        throw "published bootstrap identity does not match bootstrap/r00.xml"
+    }
+
+    & git -C $repoRoot cat-file -e "$($snapshotOid):default.xml" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        throw "the Bootstrap Integration Snapshot must not contain default.xml"
     }
 }
 

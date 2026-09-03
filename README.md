@@ -120,20 +120,24 @@ the wrapper appends `--worktree` unless the caller already supplied it. This is
 the required Windows checkout mode:
 
 ```powershell
+$workspace = "C:\work\tsfg-workspace"
+New-Item -ItemType Directory -Path $workspace | Out-Null
+Set-Location -LiteralPath $workspace
+
 & $wrapperPath init `
     -u https://github.com/xuelongling/manifests.git `
-    -b <full-manifest-commit-oid> `
+    -b c0ea4bb1d32f80cea00d852fe6e36950e2aee598 `
     -m bootstrap/r00.xml `
     --repo-rev=v2.65
 ```
 
-`<full-manifest-commit-oid>` is intentionally not a floating placeholder that a
-user may execute. The immutable `bootstrap/r00.xml` and the complete Manifest
-Repository commit that contains it belong to the later Bootstrap Integration
-Snapshot milestone. Until that identity is published, do not replace it with
-`main`, a branch tip, an abbreviated OID, or a `default.xml` invocation. This
-ticket installs and proves the Bootstrap Trust Root only; it does not materialize
-a Repo Workspace.
+The canonical Manifest Repository URL, complete commit OID, and selected
+`bootstrap/r00.xml` above jointly identify the R00 Bootstrap Integration
+Snapshot. The commit locks the exact `tsfg` and `.agents` project OIDs; their
+`upstream="refs/heads/main"` attributes are fetch hints only. Do not replace the
+manifest commit or project revisions with `main`, another branch tip, or an
+abbreviated OID. R00 deliberately uses complete clones and includes no approved
+Upstream Fork.
 
 For `repo.cmd sync`, the wrapper appends `--verify` unless it is already present:
 
@@ -141,12 +145,30 @@ For `repo.cmd sync`, the wrapper appends `--verify` unless it is already present
 & $wrapperPath sync
 ```
 
+Run synchronization from the fresh Repo Workspace root used for `init`. On
+success, the only manifest projects are `tsfg/` and `.agents/` at their canonical
+workspace paths. The manifest also creates the Agent Activation Surface as real
+links at `AGENTS.md`, `.codex/config.toml`, and `.codex/hooks.json`; managed skills
+remain discoverable at `.agents/skills/`. Start Codex from this trusted root.
+
+Materialization fails if Windows cannot create symbolic links, if an activation
+destination conflicts, or if a link cannot resolve to the matching managed file
+inside `.agents/`. There is no copy fallback: replacing an activation link with
+ordinary file content is not a valid workspace. Remove the incomplete workspace,
+correct the Windows link capability or conflicting entry, and replay the complete
+bootstrap identity in a fresh directory.
+
+There is intentionally no `default.xml` before the first Stable Integration.
+The bootstrap identity is independently replayable but does not claim to be a
+Stable Integration.
+
 The wrapper refuses `--no-verify`, `--no-repo-verify`, and every unique long-option
 abbreviation that repo would accept for either switch, with exit code 2 before
 the launcher runs. The `repo sync --verify` option only selects non-interactive
 post-sync-hook verification. R00 defines no post-sync hook, so this option is not
 project OID verification and is never a substitute for the separate Workspace Verification
-command required after materialization.
+command required after materialization. In particular, `repo sync --verify` is not
+project OID verification and does not verify the Agent Activation Surface.
 
 ## Failure outcomes
 

@@ -86,7 +86,7 @@ Test-Case "README documents wrapper defaults and the materialization boundary" {
         '--no-verify',
         '--no-repo-verify',
         'https://github.com/xuelongling/manifests.git',
-        '-b <full-manifest-commit-oid>',
+        '-b c0ea4bb1d32f80cea00d852fe6e36950e2aee598',
         '-m bootstrap/r00.xml',
         'Workspace Verification'
     )) {
@@ -103,7 +103,10 @@ Test-Case "repository contains a wrapper but no installer script" {
     }
 
     $unexpected = @($trackedScripts | Where-Object {
-        $_ -notmatch '^tests/[^/]+\.tests\.ps1$' -and $_ -ne 'tests/run.ps1' -and $_ -ne 'repo.cmd'
+        $_ -notmatch '^tests/[^/]+\.tests\.ps1$' -and
+        $_ -ne 'tests/run.ps1' -and
+        $_ -ne 'tools/verify-agent-activation.ps1' -and
+        $_ -ne 'repo.cmd'
     })
     if ($unexpected.Count -ne 0) {
         throw "unexpected executable install-capable scripts: $($unexpected -join ', ')"
