@@ -245,6 +245,20 @@ Test-Case "missing Python fails clearly" {
     }
 }
 
+Test-Case "wrapper metadata does not leak into launcher output" {
+    $sandbox = New-WrapperSandbox
+    try {
+        $result = Invoke-Wrapper -Sandbox $sandbox -Arguments @("--version")
+        Assert-Equal 0 $result.ExitCode "the launcher should run successfully"
+        if ($result.Output -match "SPDX-License-Identifier") {
+            throw "the wrapper should not echo its source metadata"
+        }
+    }
+    finally {
+        Remove-WrapperSandbox -Path $sandbox
+    }
+}
+
 Write-Host "$passed passed, $failed failed"
 if ($failed -ne 0) {
     exit 1
