@@ -141,7 +141,8 @@ For `repo.cmd sync`, the wrapper appends `--verify` unless it is already present
 & $wrapperPath sync
 ```
 
-The wrapper refuses `--no-verify` and `--no-repo-verify` with exit code 2 before
+The wrapper refuses `--no-verify`, `--no-repo-verify`, and every unique long-option
+abbreviation that repo would accept for either switch, with exit code 2 before
 the launcher runs. The `repo sync --verify` option only selects non-interactive
 post-sync-hook verification. R00 defines no post-sync hook, so this option is not
 project OID verification and is never a substitute for the separate Workspace Verification

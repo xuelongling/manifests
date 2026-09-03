@@ -1,3 +1,4 @@
+rem SPDX-License-Identifier: MIT
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
@@ -19,14 +20,14 @@ goto run_repo
 :default_worktree
 set "repo_default=--worktree"
 for %%A in (%*) do if /I "%%~A"=="--worktree" set "repo_default="
-for %%A in (%*) do if /I "%%~A"=="--no-repo-verify" goto reject_no_repo_verify
+for %%A in (%*) do for %%U in (--no-r --no-re --no-rep --no-repo --no-repo- --no-repo-v --no-repo-ve --no-repo-ver --no-repo-veri --no-repo-verif --no-repo-verify) do if /I "%%~A"=="%%U" goto reject_no_repo_verify
 goto run_repo
 
 :default_verify
 set "repo_default=--verify"
 for %%A in (%*) do if /I "%%~A"=="--verify" set "repo_default="
-for %%A in (%*) do if /I "%%~A"=="--no-verify" goto reject_no_verify
-for %%A in (%*) do if /I "%%~A"=="--no-repo-verify" goto reject_no_repo_verify
+for %%A in (%*) do for %%U in (--no-v --no-ve --no-ver --no-veri --no-verif --no-verify) do if /I "%%~A"=="%%U" goto reject_no_verify
+for %%A in (%*) do for %%U in (--no-r --no-re --no-rep --no-repo --no-repo- --no-repo-v --no-repo-ve --no-repo-ver --no-repo-veri --no-repo-verif --no-repo-verify) do if /I "%%~A"=="%%U" goto reject_no_repo_verify
 goto run_repo
 
 :reject_no_verify

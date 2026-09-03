@@ -192,6 +192,28 @@ Test-Case "init rejects no-repo-verify before invoking the launcher" {
     }
 }
 
+Test-Case "repo option abbreviations cannot bypass verification policy" {
+    foreach ($case in @(
+        @{ Command = "sync"; Option = "--no-v"; ExpectedName = "--no-verify" },
+        @{ Command = "sync"; Option = "--no-ver"; ExpectedName = "--no-verify" },
+        @{ Command = "sync"; Option = "--no-repo-v"; ExpectedName = "--no-repo-verify" },
+        @{ Command = "init"; Option = "--no-repo-verif"; ExpectedName = "--no-repo-verify" }
+    )) {
+        $sandbox = New-WrapperSandbox
+        try {
+            $result = Invoke-Wrapper -Sandbox $sandbox -Arguments @($case.Command, $case.Option)
+            Assert-Equal 2 $result.ExitCode "$($case.Option) should be rejected as unsafe usage"
+            Assert-Equal "" $result.Arguments "the launcher should not run for $($case.Option)"
+            if ($result.Output -notmatch [regex]::Escape("refuses $($case.ExpectedName)")) {
+                throw "the rejection should name $($case.ExpectedName) (actual: $($result.Output))"
+            }
+        }
+        finally {
+            Remove-WrapperSandbox -Path $sandbox
+        }
+    }
+}
+
 Test-Case "a missing launcher fails clearly before Python is invoked" {
     $sandbox = New-WrapperSandbox
     try {
