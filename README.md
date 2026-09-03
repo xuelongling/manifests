@@ -1,0 +1,161 @@
+# tsfg Manifest Repository
+
+This repository versions Google `repo` orchestration metadata for tsfg. Git,
+Python, and the Google `repo` launcher form the Bootstrap Trust Root used before
+the reproducible build boundary.
+
+## Pinned Google repo release
+
+The Windows bootstrap uses the official immutable launcher for Google `repo`
+release 2.65:
+
+- URL: `https://storage.googleapis.com/git-repo-downloads/repo-2.65`
+- Size: 45,880 bytes
+- SHA-256: `1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f`
+- Full repo source revision: `--repo-rev=v2.65`
+
+The downloaded bytes match the `repo` launcher stored by Google at the signed
+`v2.65` source tag. Do not substitute the mutable `.../repo` download URL, a
+moving `stable` branch, or a different digest.
+
+## Manual Windows installation
+
+Prerequisites are Git for Windows, a `python` command that runs Python 3, HTTPS
+access to the pinned URL above, and a writable per-user tools directory. Run the
+following PowerShell from this reviewed Manifest Repository checkout. These are
+manual commands; the repository deliberately provides no installer script.
+
+First confirm the prerequisites before creating a launcher:
+
+```powershell
+$ErrorActionPreference = "Stop"
+
+$pythonVersion = (& python --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $pythonVersion.StartsWith("Python 3.")) {
+    throw "Python 3 is required on PATH; no launcher was installed."
+}
+
+$wrapperSource = (Resolve-Path -LiteralPath ".\repo.cmd").Path
+$repoUrl = "https://storage.googleapis.com/git-repo-downloads/repo-2.65"
+$repoSha256 = "1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f"
+$toolDir = Join-Path $env:LOCALAPPDATA "tsfg\repo\v2.65"
+$launcherStage = Join-Path $toolDir "repo.py.download"
+$wrapperStage = Join-Path $toolDir "repo.cmd.download"
+$launcherPath = Join-Path $toolDir "repo.py"
+$wrapperPath = Join-Path $toolDir "repo.cmd"
+```
+
+Download to a staging name, verify the pinned digest, stage the reviewed
+wrapper, and only then publish the two files in the same directory:
+
+```powershell
+try {
+    New-Item -ItemType Directory -Path $toolDir -Force | Out-Null
+
+    $writeProbe = Join-Path $toolDir (".write-probe-" + [guid]::NewGuid().ToString("N"))
+    Set-Content -LiteralPath $writeProbe -Value "probe" -Encoding ascii
+    Remove-Item -LiteralPath $writeProbe -Force
+
+    Remove-Item -LiteralPath $launcherStage, $wrapperStage -Force -ErrorAction SilentlyContinue
+    Invoke-WebRequest -Uri $repoUrl -OutFile $launcherStage
+
+    $actualSha256 = (Get-FileHash -LiteralPath $launcherStage -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha256 -ne $repoSha256) {
+        throw "repo.py SHA-256 mismatch: expected $repoSha256, got $actualSha256"
+    }
+
+    Copy-Item -LiteralPath $wrapperSource -Destination $wrapperStage -Force
+    Move-Item -LiteralPath $wrapperStage -Destination $wrapperPath -Force
+    Move-Item -LiteralPath $launcherStage -Destination $launcherPath -Force
+}
+catch {
+    Remove-Item -LiteralPath $launcherStage, $wrapperStage -Force -ErrorAction SilentlyContinue
+    throw
+}
+```
+
+The final rename occurs within one directory. A failed download or digest check
+therefore leaves no new `repo.py`; a write-permission failure stops before the
+download; and all staging files are removed on failure. If a prior verified
+installation exists, a failed replacement leaves its final `repo.py` untouched.
+
+## Verify and record the installation
+
+Query the installed launcher through the wrapper, independently re-hash the
+final file, and record the result together with the reviewed documentation
+commit:
+
+```powershell
+$versionOutput = (& $wrapperPath --version 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "repo launcher\s+version 2\.65\b") {
+    throw "Unexpected launcher version output: $versionOutput"
+}
+
+$actualInstalledSha256 = (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualInstalledSha256 -ne $repoSha256) {
+    throw "Installed repo.py SHA-256 mismatch: expected $repoSha256, got $actualInstalledSha256"
+}
+
+$manifestDocsCommit = (& git rev-parse HEAD).Trim()
+$recordPath = Join-Path $toolDir "bootstrap-trust-root.txt"
+@(
+    "launcher_version=2.65"
+    "launcher_sha256=$actualInstalledSha256"
+    "repo_source_revision=v2.65"
+    "manifest_docs_commit=$manifestDocsCommit"
+) | Set-Content -LiteralPath $recordPath -Encoding utf8NoBOM
+
+Get-Content -LiteralPath $recordPath
+```
+
+The command output must include `repo launcher version 2.65`, and the recorded
+digest must equal
+`1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f`.
+
+## Wrapper safety defaults
+
+Invoke the installed `repo.cmd`; do not invoke `repo.py` directly. `repo.cmd init`
+is the public initialization command. For `init`,
+the wrapper appends `--worktree` unless the caller already supplied it. This is
+the required Windows checkout mode:
+
+```powershell
+& $wrapperPath init `
+    -u https://github.com/xuelongling/manifests.git `
+    -b <full-manifest-commit-oid> `
+    -m bootstrap/r00.xml `
+    --repo-rev=v2.65
+```
+
+`<full-manifest-commit-oid>` is intentionally not a floating placeholder that a
+user may execute. The immutable `bootstrap/r00.xml` and the complete Manifest
+Repository commit that contains it belong to the later Bootstrap Integration
+Snapshot milestone. Until that identity is published, do not replace it with
+`main`, a branch tip, an abbreviated OID, or a `default.xml` invocation. This
+ticket installs and proves the Bootstrap Trust Root only; it does not materialize
+a Repo Workspace.
+
+For `repo.cmd sync`, the wrapper appends `--verify` unless it is already present:
+
+```powershell
+& $wrapperPath sync
+```
+
+The wrapper refuses `--no-verify` and `--no-repo-verify` with exit code 2 before
+the launcher runs. The `repo sync --verify` option only selects non-interactive
+post-sync-hook verification. R00 defines no post-sync hook, so this option is not
+project OID verification and is never a substitute for the separate Workspace Verification
+command required after materialization.
+
+## Failure outcomes
+
+| Failure | Required result |
+| --- | --- |
+| Download or TLS failure | PowerShell reports the network error, removes `repo.py.download`, and publishes no new `repo.py`. |
+| SHA-256 mismatch | The command reports both expected and actual digests, removes the staged bytes, and publishes no new `repo.py`. |
+| Python 3 missing | The prerequisite check or `repo.cmd` exits with a clear Python 3 error before the launcher runs. |
+| User tools directory not writable | Directory creation or the write probe fails before download, so no new `repo.py` exists. |
+
+Never rename or copy an unverified partial download to `repo.py`. A `repo.cmd`
+without its verified adjacent launcher fails explicitly and must not be treated
+as an installed Bootstrap Trust Root.
