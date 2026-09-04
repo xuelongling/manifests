@@ -57,7 +57,16 @@ function Remove-MaterializationSandbox {
         -not ([System.IO.Path]::GetFileName($resolved)).StartsWith("tsfg-materialization-test-", [System.StringComparison]::Ordinal)) {
         throw "Refusing to remove unexpected test path: $resolved"
     }
-    Remove-Item -LiteralPath $resolved -Recurse -Force
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -eq 9) { throw }
+            Start-Sleep -Milliseconds (25 * ($attempt + 1))
+        }
+    }
 }
 
 function Invoke-SandboxSync {
