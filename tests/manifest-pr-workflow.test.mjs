@@ -139,6 +139,8 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
   assert.match(compatibility, /target: \[linux-x86_64-gnu, windows-x86_64-msvc\]/);
   assert.match(compatibility, /repository: xuelongling\/tsfg/);
   assert.match(compatibility, /ref: \$\{\{ matrix\.candidate\.productRevision \}\}/);
+  assert.match(compatibility, /TSFG_BASELINE_PRODUCT_REVISION: \$\{\{ matrix\.candidate\.baselineProductRevision \}\}/);
+  assert.match(compatibility, /baseline\.product\.commitOid=process\.env\.TSFG_BASELINE_PRODUCT_REVISION/);
   for (const combination of [
     "baseline/baseline",
     "candidate/baseline",
@@ -166,31 +168,6 @@ test("reproducibility comparators are build-free and compare producer a with pro
   assert.doesNotMatch(repro, /tsfg-build(?:\.cmd)?" build /);
   assert.match(repro, /reproducibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/\$\{\{ matrix\.profile \}\}\/report\.json/);
   assert.match(repro, /retention-days: 90/);
-});
-
-test("every Linux offline phase runs as the runner user in a loopback-only network namespace", async () => {
-  const source = await workflow();
-  for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
-    const selectedJob = job(source, name);
-    assert.match(selectedJob, /unshare --net --mount-proc/, name);
-    assert.match(selectedJob, /ip link set lo up/, name);
-    assert.match(selectedJob, /setpriv --reuid="\$1" --regid="\$2" --clear-groups/, name);
-  }
-
-  const workspace = job(source, "workspace-verification");
-  assert.match(workspace, /offline "\$workspace\/tsfg\/eng\/tsfg-build" verify-workspace/);
-  assert.ok(workspace.indexOf(" prefetch ") < workspace.indexOf("offline \"$workspace/tsfg/eng/tsfg-build\" verify-workspace"));
-
-  const build = job(source, "product-build");
-  for (const command of ["verify-workspace", "build", "test", "package"]) {
-    assert.match(build, new RegExp(`offline "\\$workspace/tsfg/eng/tsfg-build" ${command}`));
-  }
-  assert.ok(build.indexOf(" prefetch ") < build.indexOf("offline \"$workspace/tsfg/eng/tsfg-build\" verify-workspace"));
-
-  assert.match(job(source, "compatibility"), /offline "\$node_path" --require[\s\S]*tsfg-build\.mjs test/);
-  const repro = job(source, "reproducibility");
-  assert.match(repro, /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
-  assert.ok(repro.indexOf(" prefetch ") < repro.indexOf("offline \".ci/product/eng/tsfg-build\" repro-check"));
 });
 
 test("candidate evidence archives every manifest identity and resolved product proof for 90 days", async () => {

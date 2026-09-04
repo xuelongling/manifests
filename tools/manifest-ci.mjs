@@ -281,6 +281,9 @@ function resolvedIdentity(baseline, baselineProjects, manifestXml, manifestName,
   const replacements = projects
     .filter((project) => baselineProjects.find((entry) => entry.name === project.name)?.revision !== project.revision)
     .map(({ name: project, revision }) => ({ project, revision }));
+  if (replacements.length === 0) {
+    throw new ManifestCiError("Candidate Overlay must contain at least one effective project revision change");
+  }
   const overlay = { baseline, replacements, schemaVersion: "1" };
   const resolved = { baseline, projects, schemaVersion: "1" };
   const summary = {
@@ -299,6 +302,7 @@ function resolvedIdentity(baseline, baselineProjects, manifestXml, manifestName,
     plan: {
       agentChanged: replacements.some((entry) => entry.project === ".agents.git"),
       agentRevision: projects.find((entry) => entry.name === ".agents.git").revision,
+      baselineProductRevision: baselineProjects.find((entry) => entry.name === "tsfg.git").revision,
       id: summary.resolvedManifestDigest.slice("sha256:".length),
       manifest: manifestName,
       manifestRevision,
@@ -461,6 +465,7 @@ function requireCompatibility(report, candidatePlan, target, label) {
   const combinations = report.result?.compatibility?.combinations;
   if (
     report.result?.target !== target ||
+    report.result?.compatibility?.artifacts?.baseline?.productOid !== candidatePlan.baselineProductRevision ||
     report.result?.compatibility?.artifacts?.candidate?.productOid !== candidatePlan.productRevision ||
     report.result?.contractSet?.canonical !== "{}" ||
     report.result?.contractSet?.id !== byteDigest("{}") ||
@@ -536,6 +541,7 @@ async function verdict(options) {
       canonicalize(resolved.baseline) !== canonicalize(overlay.baseline) ||
       canonicalize(resolved.projects) !== canonicalize(resolvedProjects) ||
       candidatePlan.manifestRevision !== requireOid(candidatePlan.manifestRevision, "candidate manifest revision") ||
+      candidatePlan.baselineProductRevision !== requireOid(candidatePlan.baselineProductRevision, "baseline product revision") ||
       resolvedProjects.find((project) => project.name === "tsfg.git")?.revision !== candidatePlan.productRevision ||
       resolvedProjects.find((project) => project.name === ".agents.git")?.revision !== candidatePlan.agentRevision
     ) {
@@ -664,7 +670,11 @@ async function candidate(options) {
   let manifestName;
   let manifestXml;
   if (defaultXml !== undefined) {
-    if (git(repository, ["rev-parse", "HEAD"]).stdout.trim() !== baselineRevision) {
+    const remoteMain = git(repository, ["rev-parse", "refs/remotes/origin/main"], true);
+    const trustedMain = remoteMain.status === 0
+      ? remoteMain.stdout.trim()
+      : git(repository, ["rev-parse", "refs/heads/main"]).stdout.trim();
+    if (trustedMain !== baselineRevision) {
       throw new ManifestCiError("after the first Stable, the baseline must be the repository's current Stable identity");
     }
     requireDefaultSnapshot(repository, baselineRevision, defaultXml);
@@ -696,18 +706,23 @@ async function candidate(options) {
       throw new ManifestCiError(`replacement project is not in the fixed baseline: ${replacement.project}`);
     }
   }
-  replacements.sort((left, right) => Buffer.from(left.project).compare(Buffer.from(right.project)));
+  const effectiveReplacements = replacements.filter((replacement) =>
+    projects.find((project) => project.name === replacement.project)?.revision !== replacement.revision);
+  if (effectiveReplacements.length === 0) {
+    throw new ManifestCiError("Candidate Overlay must contain at least one effective project revision change");
+  }
+  effectiveReplacements.sort((left, right) => Buffer.from(left.project).compare(Buffer.from(right.project)));
 
   const baseline = { manifest: manifestName, repository: manifestRepositoryUrl, revision: baselineRevision };
-  const overlay = { baseline, replacements, schemaVersion: "1" };
+  const overlay = { baseline, replacements: effectiveReplacements, schemaVersion: "1" };
   const resolvedProjects = projects
     .map((project) => ({
       ...project,
-      revision: replacements.find((replacement) => replacement.project === project.name)?.revision ?? project.revision,
+      revision: effectiveReplacements.find((replacement) => replacement.project === project.name)?.revision ?? project.revision,
     }))
     .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
   const resolved = { baseline, projects: resolvedProjects, schemaVersion: "1" };
-  const replacementByProject = new Map(replacements.map((entry) => [entry.project, entry.revision]));
+  const replacementByProject = new Map(effectiveReplacements.map((entry) => [entry.project, entry.revision]));
   let resolvedXml = manifestXml;
   resolvedXml = resolvedXml.replace(/<project\b[^>]*>/g, (projectOpening) => {
     const opening = /^<project([\s\S]*?)(\/?)>$/.exec(projectOpening);

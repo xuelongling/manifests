@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const manifestCi = path.join(repositoryRoot, "tools", "manifest-ci.mjs");
 const bootstrapRevision = "d94f4e6bff9aa980b18b0df94e133559e4b61240";
+const bootstrapProductRevision = "eb2838e4c4910113b23072b40c526a8b2843f744";
 const candidateRevision = "4".repeat(40);
 
 function invoke(arguments_, cwd = repositoryRoot) {
@@ -170,6 +171,7 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
     assert.deepEqual(plan.candidates[0], {
       agentChanged: false,
       agentRevision: baseAgent,
+      baselineProductRevision: baseProduct,
       id: plan.candidates[0].id,
       manifest: "snapshots/tsfg-v0.1.0.xml",
       manifestRevision: head,
@@ -186,6 +188,35 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
     );
   } finally {
     await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("candidate and gate seams reject overlays without an effective project revision change", async () => {
+  const candidateSandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-noop-candidate-"));
+  const gateSandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-noop-gate-"));
+  try {
+    const candidate = invoke([
+      "candidate", "--repository", repositoryRoot, "--baseline-revision", bootstrapRevision,
+      "--replacement", `tsfg.git=${bootstrapProductRevision}`, "--out", path.join(candidateSandbox, "evidence"),
+    ]);
+    assert.equal(candidate.status, 1);
+    assert.match(candidate.stderr, /effective project revision change/i);
+
+    const product = "1".repeat(40);
+    const agent = "2".repeat(40);
+    const base = await initializeRepository(gateSandbox, manifest(product, agent));
+    await mkdir(path.join(gateSandbox, "snapshots"));
+    await writeFile(path.join(gateSandbox, "snapshots", "tsfg-v0.1.0.xml"), manifest(product, agent));
+    const head = commitAll(gateSandbox, "no-op candidate snapshot");
+    const gate = invoke([
+      "gate", "--repository", gateSandbox, "--base", base, "--head", head,
+      "--out", path.join(gateSandbox, "evidence"),
+    ], gateSandbox);
+    assert.equal(gate.status, 1);
+    assert.match(gate.stderr, /effective project revision change/i);
+  } finally {
+    await rm(candidateSandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(gateSandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -302,6 +333,7 @@ test("manifest verdict requires every product and agent evidence lane before dec
     const candidate = {
       agentChanged: false,
       agentRevision,
+      baselineProductRevision: "1".repeat(40),
       id: identity,
       manifest: "snapshots/tsfg-v0.1.0.xml",
       manifestRevision: "4".repeat(40),
@@ -341,7 +373,10 @@ test("manifest verdict requires every product and agent evidence lane before dec
         result: {
           contractSet: { canonical: "{}", id: byteDigest("{}") },
           compatibility: {
-            artifacts: { candidate: { productOid: productRevision } },
+            artifacts: {
+              baseline: { productOid: candidate.baselineProductRevision },
+              candidate: { productOid: productRevision },
+            },
             combinations: [
               { consumer: "baseline", producer: "baseline", status: "passed" },
               { consumer: "baseline", producer: "candidate", status: "passed" },
@@ -410,6 +445,20 @@ test("manifest verdict requires every product and agent evidence lane before dec
     assert.equal(verdict.requiredEvidence.producers, "8/8");
     assert.equal(verdict.requiredEvidence.reproducibility, "4/4");
     assert.match(verdict.evidenceDigest, /^sha256:[0-9a-f]{64}$/);
+
+    const compatibilityPath = path.join(evidence, "compatibility", identity, "linux-x86_64-gnu", "report.json");
+    const foreignBaseline = JSON.parse(await readFile(compatibilityPath, "utf8"));
+    foreignBaseline.result.compatibility.artifacts.baseline.productOid = "8".repeat(40);
+    await writeJson(compatibilityPath, foreignBaseline);
+    const foreignBaselineOutput = path.join(sandbox, "foreign-baseline.json");
+    const foreignBaselineResult = invoke([
+      "verdict", "--evidence", evidence, "--job-results", jobsPath, "--out", foreignBaselineOutput,
+    ]);
+    assert.equal(foreignBaselineResult.status, 1);
+    assert.match(foreignBaselineResult.stderr, /candidate-bound compatibility matrix/i);
+    await assert.rejects(readFile(foreignBaselineOutput));
+    foreignBaseline.result.compatibility.artifacts.baseline.productOid = candidate.baselineProductRevision;
+    await writeJson(compatibilityPath, foreignBaseline);
 
     const foreignWorkspace = workspaceReport(candidate, resolved);
     foreignWorkspace.result.projects.find((project) => project.id === "tsfg.git").head = "9".repeat(40);
@@ -613,6 +662,7 @@ test("candidate Stable baseline must be the repository's current default identit
     const historicalStable = commitAll(sandbox, "stable");
     await writeFile(path.join(sandbox, "README.md"), "newer manifest repository state\n");
     commitAll(sandbox, "advance current identity");
+    runGit(sandbox, "checkout", "--detach", historicalStable);
     const result = invoke([
       "candidate", "--repository", sandbox, "--baseline-revision", historicalStable,
       "--replacement", `tsfg.git=${"3".repeat(40)}`, "--out", path.join(sandbox, "candidate"),

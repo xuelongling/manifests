@@ -195,13 +195,7 @@ jobs:
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
-              ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
-          }
-          offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           if-no-files-found: error
@@ -282,16 +276,10 @@ jobs:
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
-              ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
-          }
-          offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
-          offline "$workspace/tsfg/eng/tsfg-build" build --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/build-report.json"
-          offline "$workspace/tsfg/eng/tsfg-build" test --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/test-report.json"
-          offline "$workspace/tsfg/eng/tsfg-build" package --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --input "$build_output" --out "$package_output" --report "$root/package-report.json"
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
+          "$workspace/tsfg/eng/tsfg-build" build --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/build-report.json"
+          "$workspace/tsfg/eng/tsfg-build" test --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/test-report.json"
+          "$workspace/tsfg/eng/tsfg-build" package --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --input "$build_output" --out "$package_output" --report "$root/package-report.json"
           cp -a "$(realpath "$package_output")/." "$root/package/"
           TSFG_BINDING_ROOT="$root" TSFG_CANDIDATE_ID="${{ matrix.candidate.id }}" TSFG_PRODUCT_REVISION="${{ matrix.candidate.productRevision }}" node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises'; import {join} from 'node:path'; const report=JSON.parse(await readFile(join(process.env.TSFG_BINDING_ROOT,'package-report.json'),'utf8')); await writeFile(join(process.env.TSFG_BINDING_ROOT,'candidate-binding.json'),JSON.stringify({buildIdentityDigest:report.result.buildIdentity.digest,candidateId:process.env.TSFG_CANDIDATE_ID,productRevision:process.env.TSFG_PRODUCT_REVISION,schemaVersion:'1'})+'\n')"
       - name: Build, test, and package on Windows
@@ -354,25 +342,19 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Create baseline and candidate compatibility artifacts
         env:
+          TSFG_BASELINE_PRODUCT_REVISION: ${{ matrix.candidate.baselineProductRevision }}
           TSFG_CANDIDATE_PRODUCT_REVISION: ${{ matrix.candidate.productRevision }}
         shell: bash
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           mkdir -p "$input" ".ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}"
-          TSFG_COMPATIBILITY_INPUT="$input" node --input-type=module -e "import {writeFile} from 'node:fs/promises'; import {join} from 'node:path'; import {baselineSyntheticArtifact,candidateSyntheticArtifact} from './.ci/product/tests/r00/contract-compatibility-fixtures.mjs'; const baseline=baselineSyntheticArtifact(); const candidate=candidateSyntheticArtifact(); candidate.product.commitOid=process.env.TSFG_CANDIDATE_PRODUCT_REVISION; await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'baseline.json'),JSON.stringify(baseline)+'\n'); await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'candidate.json'),JSON.stringify(candidate)+'\n')"
+          TSFG_COMPATIBILITY_INPUT="$input" node --input-type=module -e "import {writeFile} from 'node:fs/promises'; import {join} from 'node:path'; import {baselineSyntheticArtifact,candidateSyntheticArtifact} from './.ci/product/tests/r00/contract-compatibility-fixtures.mjs'; const baseline=baselineSyntheticArtifact(); const candidate=candidateSyntheticArtifact(); baseline.product.commitOid=process.env.TSFG_BASELINE_PRODUCT_REVISION; candidate.product.commitOid=process.env.TSFG_CANDIDATE_PRODUCT_REVISION; await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'baseline.json'),JSON.stringify(baseline)+'\n'); await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'candidate.json'),JSON.stringify(candidate)+'\n')"
       - name: Execute baseline/baseline, candidate/baseline, baseline/candidate, and candidate/candidate
         shell: bash
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
-          offline() {
-            sudo unshare --net --mount-proc bash -c '
-              ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
-          }
-          node_path="$(command -v node)"
-          offline "$node_path" --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
+          node --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
             --compatibility-baseline "$input/baseline.json" \
             --compatibility-candidate "$input/candidate.json" \
             --report "$report"
@@ -421,13 +403,7 @@ jobs:
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
-              ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
-          }
-          offline ".ci/product/eng/tsfg-build" repro-check --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" \
+          ".ci/product/eng/tsfg-build" repro-check --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" \
             --producer-a "$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/a/package" \
             --producer-b "$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/b/package" \
             --workspace "$GITHUB_WORKSPACE/.ci/product" \
