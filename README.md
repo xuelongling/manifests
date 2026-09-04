@@ -195,3 +195,33 @@ project OID verification and does not verify the Agent Activation Surface.
 Never rename or copy an unverified partial download to `repo.py`. A `repo.cmd`
 without its verified adjacent launcher fails explicitly and must not be treated
 as an installed Bootstrap Trust Root.
+
+## Candidate and pull-request validation
+
+Integration Owners create transient Candidate Overlay evidence with the public
+manifest CI command. The baseline argument is always a complete Manifest
+Repository commit OID; before the first Stable it must be the published
+Bootstrap Integration Snapshot above, and after that it must contain a
+`default.xml` byte-identical to an immutable versioned snapshot.
+
+```powershell
+node tools/manifest-ci.mjs candidate `
+    --repository . `
+    --baseline-revision d94f4e6bff9aa980b18b0df94e133559e4b61240 `
+    --replacement tsfg.git=<complete-candidate-oid> `
+    --out $env:RUNNER_TEMP\candidate
+```
+
+The output directory contains `candidate-overlay.json`, the fully resolved JSON
+and XML manifests, and `candidate-summary.json` with complete canonical SHA-256
+digests. It is CI evidence, not Manifest Repository source. Ordinary Candidate
+evidence is retained for 90 days; a failed Candidate is never committed as a
+versioned snapshot.
+
+The Manifest PR workflow runs `manifest-ci.mjs gate` against the trusted PR base
+and candidate head. This independently compares Git history for bootstrap and
+versioned snapshot immutability, validates the complete R00 project and Agent
+Activation Surface shape, and emits the resolved candidates consumed by the
+product and agent matrices. `manifest-ci.mjs tag-policy` compares trusted tag
+ref maps and rejects release tag movement or deletion fixtures; repository
+ruleset protection remains a separate required control.

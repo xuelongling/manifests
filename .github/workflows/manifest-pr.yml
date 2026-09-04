@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
-          node --test tests/manifest-ci.test.mjs tests/manifest-pr-workflow.test.mjs
+          pwsh -NoProfile -File tests/run.ps1
       - name: Compare manifest history and plan candidates
         shell: bash
         run: node tools/manifest-ci.mjs gate --repository . --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --out .ci/manifest-gate
@@ -132,16 +132,16 @@ jobs:
         run: |
           workspace="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/workspace"
           root="$GITHUB_WORKSPACE/.ci/evidence/workspace/${{ matrix.candidate.id }}"
+          manifest_source="file://$GITHUB_WORKSPACE"
           mkdir -p "$root"
-          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$TSFG_MANIFEST_URL" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
-          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace "$workspace" > "$root/materialized-identity.json"
+          git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/tool-cache"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          manifest_revision=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')).manifestRevision)" "$root/materialized-identity.json")
-          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "$manifest_revision" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           if-no-files-found: error
@@ -191,21 +191,23 @@ jobs:
         shell: bash
         run: |
           workspace="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
-          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$TSFG_MANIFEST_URL" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          manifest_source="file://$GITHUB_WORKSPACE"
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
-          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace "$workspace" > .ci/materialized-identity.json
+          git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
       - name: Materialize the resolved candidate on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $workspace = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          $manifestSource = "file:///" + $env:GITHUB_WORKSPACE.Replace('\', '/')
           Push-Location $workspace
-          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" init -u $env:TSFG_MANIFEST_URL -b '${{ matrix.candidate.manifestRevision }}' -m '${{ matrix.candidate.manifest }}' --repo-rev=v2.65
+          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" init -u $manifestSource -b '${{ matrix.candidate.manifestRevision }}' -m '${{ matrix.candidate.manifest }}' --repo-rev=v2.65
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" sync --verify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace $workspace | Out-File .ci/materialized-identity.json -Encoding utf8NoBOM
+          git -C "$workspace/.repo/manifests" remote set-url origin $env:TSFG_MANIFEST_URL
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build, test, and package on Linux
         if: runner.os == 'Linux'
@@ -220,8 +222,7 @@ jobs:
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          manifest_revision=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('.ci/materialized-identity.json','utf8')).manifestRevision)")
-          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "$manifest_revision" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
           "$workspace/tsfg/eng/tsfg-build" build --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/build-report.json"
           "$workspace/tsfg/eng/tsfg-build" test --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/test-report.json"
           "$workspace/tsfg/eng/tsfg-build" package --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --input "$build_output" --out "$package_output" --report "$root/package-report.json"
@@ -243,8 +244,7 @@ jobs:
           $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
           & "$workspace/tsfg/eng/tsfg-build.cmd" prefetch --report "$root/prefetch-report.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $materialized = Get-Content -Raw .ci/materialized-identity.json | ConvertFrom-Json
-          & "$workspace/tsfg/eng/tsfg-build.cmd" verify-workspace --workspace $workspace --manifest-url $env:TSFG_MANIFEST_URL --manifest-revision $materialized.manifestRevision --manifest '${{ matrix.candidate.manifest }}' --report "$root/workspace-report.json"
+          & "$workspace/tsfg/eng/tsfg-build.cmd" verify-workspace --workspace $workspace --manifest-url $env:TSFG_MANIFEST_URL --manifest-revision '${{ matrix.candidate.manifestRevision }}' --manifest '${{ matrix.candidate.manifest }}' --report "$root/workspace-report.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$workspace/tsfg/eng/tsfg-build.cmd" build --target '${{ matrix.target }}' --profile '${{ matrix.profile }}' --workspace "$workspace/tsfg" --out $buildOutput --report "$root/build-report.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

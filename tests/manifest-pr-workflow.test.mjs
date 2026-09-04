@@ -46,6 +46,7 @@ test("repository gate compares the pull-request history and publishes its candid
   const source = await workflow();
   const gate = job(source, "repository-gate");
   assert.doesNotMatch(gate, /^\s*if:/m, "repository gate must also run when no manifest changed");
+  assert.match(gate, /pwsh -NoProfile -File tests\/run\.ps1/);
   assert.match(
     gate,
     /node tools\/manifest-ci\.mjs gate --repository \. --base "\$\{\{ github\.event\.pull_request\.base\.sha \}\}" --head "\$\{\{ github\.event\.pull_request\.head\.sha \}\}" --out \.ci\/manifest-gate/,
@@ -83,9 +84,11 @@ test("every candidate is materialized and built by two isolated producers across
   assert.match(build, /ubuntu-24\.04/);
   assert.match(build, /windows-2025/);
   assert.match(build, /manifest-\$\{\{ matrix\.candidate\.id \}\}-\$\{\{ matrix\.producer \}\}\/workspace/);
-  assert.match(build, /repo\.py" init -u "\$TSFG_MANIFEST_URL" -b "\$\{\{ matrix\.candidate\.manifestRevision \}\}" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
+  assert.match(build, /repo\.py" init -u "\$manifest_source" -b "\$\{\{ matrix\.candidate\.manifestRevision \}\}" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
   assert.match(build, /repo\.py" sync --verify/);
-  assert.match(build, /materialize-agent-workspace\.ts"? --workspace/);
+  assert.match(build, /git -C "\$workspace\/\.repo\/manifests" remote set-url origin "\$TSFG_MANIFEST_URL"/);
+  assert.doesNotMatch(build, /materialize-agent-workspace\.ts|materialized-identity\.json/);
+  assert.match(build, /--manifest-revision ["']?\$\{\{ matrix\.candidate\.manifestRevision \}\}/);
   assert.match(build, /tsfg-build(?:\.cmd)?" verify-workspace/);
   assert.match(build, /tsfg-build(?:\.cmd)?" build --target "?\$\{\{ matrix\.target \}\}"? --profile "?\$\{\{ matrix\.profile \}\}"?/);
   assert.match(build, /tsfg-build(?:\.cmd)?" test --target "?\$\{\{ matrix\.target \}\}"? --profile "?\$\{\{ matrix\.profile \}\}"?/);
@@ -100,6 +103,7 @@ test("every candidate has a standalone resolved Workspace Verification report", 
   assert.match(verification, /candidate: \$\{\{ fromJSON\(needs\.repository-gate\.outputs\.candidates\) \}\}/);
   assert.match(verification, /repo\.py" init[\s\S]*matrix\.candidate\.manifestRevision[\s\S]*matrix\.candidate\.manifest/);
   assert.match(verification, /repo\.py" sync --verify/);
+  assert.match(verification, /remote set-url origin "\$TSFG_MANIFEST_URL"/);
   assert.match(verification, /tsfg-build" verify-workspace/);
   assert.match(verification, /workspace\/\$\{\{ matrix\.candidate\.id \}\}\/report\.json/);
   assert.match(verification, /retention-days: 90/);
