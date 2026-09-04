@@ -73,10 +73,33 @@ test("every resolved candidate records Agent Infrastructure verification evidenc
   assert.match(agent, /retention-days: 90/);
 });
 
+test("every resolved product runs repository gates and publishes candidate-bound evidence", async () => {
+  const source = await workflow();
+  const gates = job(source, "repository-gates");
+  assert.match(gates, /needs: \[repository-gate\]/);
+  assert.match(gates, /candidate: \$\{\{ fromJSON\(needs\.repository-gate\.outputs\.candidates\) \}\}/);
+  assert.match(gates, /repository: xuelongling\/tsfg/);
+  assert.match(gates, /ref: \$\{\{ matrix\.candidate\.productRevision \}\}/);
+  assert.match(gates, /corepack pnpm@11\.25\.0 install --frozen-lockfile/);
+  assert.match(gates, /git diff --check/);
+  assert.match(gates, /workspace-policy-cli\.test\.mjs/);
+  assert.match(gates, /toolchain-lock\.test\.mjs/);
+  assert.match(gates, /typescript\/bin\/tsc --noEmit/);
+  assert.match(gates, /repository-gates\/\$\{\{ matrix\.candidate\.id \}\}\/report\.json/);
+  assert.match(gates, /candidateId:process\.env\.TSFG_CANDIDATE_ID/);
+  assert.match(gates, /productRevision:process\.env\.TSFG_PRODUCT_REVISION/);
+  assert.match(gates, /retention-days: 90/);
+
+  assert.match(job(source, "product-build"), /needs: \[[^\]]*repository-gates[^\]]*\]/);
+  assert.match(job(source, "candidate-evidence"), /needs: \[[^\]]*repository-gates[^\]]*\]/);
+  assert.match(job(source, "manifest-verdict"), /needs: \[[^\]]*repository-gates[^\]]*\]/);
+  assert.match(job(source, "manifest-verdict"), /"repository-gates"/);
+});
+
 test("every candidate is materialized and built by two isolated producers across the Tier 1 matrix", async () => {
   const source = await workflow();
   const build = job(source, "product-build");
-  assert.match(build, /needs: \[repository-gate, agent-evidence, workspace-verification\]/);
+  assert.match(build, /needs: \[repository-gate, agent-evidence, repository-gates, workspace-verification\]/);
   assert.match(build, /candidate: \$\{\{ fromJSON\(needs\.repository-gate\.outputs\.candidates\) \}\}/);
   assert.match(build, /target: \[linux-x86_64-gnu, windows-x86_64-msvc\]/);
   assert.match(build, /profile: \[debug, release\]/);
@@ -143,6 +166,31 @@ test("reproducibility comparators are build-free and compare producer a with pro
   assert.doesNotMatch(repro, /tsfg-build(?:\.cmd)?" build /);
   assert.match(repro, /reproducibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/\$\{\{ matrix\.profile \}\}\/report\.json/);
   assert.match(repro, /retention-days: 90/);
+});
+
+test("every Linux offline phase runs as the runner user in a loopback-only network namespace", async () => {
+  const source = await workflow();
+  for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
+    const selectedJob = job(source, name);
+    assert.match(selectedJob, /unshare --net --mount-proc/, name);
+    assert.match(selectedJob, /ip link set lo up/, name);
+    assert.match(selectedJob, /setpriv --reuid="\$1" --regid="\$2" --clear-groups/, name);
+  }
+
+  const workspace = job(source, "workspace-verification");
+  assert.match(workspace, /offline "\$workspace\/tsfg\/eng\/tsfg-build" verify-workspace/);
+  assert.ok(workspace.indexOf(" prefetch ") < workspace.indexOf("offline \"$workspace/tsfg/eng/tsfg-build\" verify-workspace"));
+
+  const build = job(source, "product-build");
+  for (const command of ["verify-workspace", "build", "test", "package"]) {
+    assert.match(build, new RegExp(`offline "\\$workspace/tsfg/eng/tsfg-build" ${command}`));
+  }
+  assert.ok(build.indexOf(" prefetch ") < build.indexOf("offline \"$workspace/tsfg/eng/tsfg-build\" verify-workspace"));
+
+  assert.match(job(source, "compatibility"), /offline "\$node_path" --require[\s\S]*tsfg-build\.mjs test/);
+  const repro = job(source, "reproducibility");
+  assert.match(repro, /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
+  assert.ok(repro.indexOf(" prefetch ") < repro.indexOf("offline \".ci/product/eng/tsfg-build\" repro-check"));
 });
 
 test("candidate evidence archives every manifest identity and resolved product proof for 90 days", async () => {
