@@ -276,11 +276,14 @@ trusted workflow from protected `main`. A caller-selected run from any other
 workflow or branch fails. Dispatch the workflow with the prior Candidate
 run ID, its complete 64-hex candidate ID, and the trusted controller run ID;
 the proof artifact name is derived from that candidate ID rather than supplied
-by the caller. Equivalently, validate already-downloaded artifacts and an
-API-fetched controller run document with:
+by the caller. Both trusted workflows fetch the run's pull-request head ref
+without executing it, then require the resolved manifest bytes to equal the
+selected snapshot in that exact commit. Equivalently, validate already-downloaded
+artifacts and an API-fetched controller run document with:
 
 ```powershell
 node tools/manifest-ci.mjs offline-proof `
+    --repository . `
     --candidate-evidence .ci/candidate-evidence `
     --verified-verdict .ci/verified-verdict/manifest-verdict.json `
     --candidate-id <complete-resolved-manifest-content-address> `

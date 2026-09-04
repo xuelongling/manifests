@@ -549,6 +549,23 @@ function candidateReference(candidatePlan, overlay, summary) {
   };
 }
 
+function validateResolvedCandidateIdentity(candidateId, candidatePlan, overlay, resolved, resolvedXml, summary) {
+  const candidate = candidateReference(candidatePlan, overlay, summary);
+  requireFields(resolved, ["baseline", "projects", "schemaVersion"], "resolved manifest");
+  const resolvedProjects = validateManifest(resolvedXml.toString("utf8"), "resolved manifest XML")
+    .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+  if (
+    resolved.schemaVersion !== "1" || summary.resolvedManifestDigest !== digest(resolved) ||
+    summary.resolvedManifestXmlSha256 !== byteDigest(resolvedXml) ||
+    summary.resolvedManifestDigest.slice("sha256:".length) !== candidateId ||
+    canonicalize(resolved.baseline) !== canonicalize(overlay.baseline) ||
+    canonicalize(resolved.projects) !== canonicalize(resolvedProjects) ||
+    resolvedProjects.find((project) => project.name === "tsfg.git")?.revision !== candidatePlan.productRevision ||
+    resolvedProjects.find((project) => project.name === ".agents.git")?.revision !== candidatePlan.agentRevision
+  ) throw new ManifestCiError("candidate evidence does not bind the resolved manifest identity");
+  return candidate;
+}
+
 function requireCandidateReference(actual, expected, label) {
   requireFields(actual, [
     "agentRevision", "candidateOverlayDigest", "id", "manifest", "manifestRepository", "manifestRevision",
@@ -660,6 +677,7 @@ async function requireRetainedSourceReports(root, sources, sourceFiles, label) {
 }
 
 async function loadVerifiedCandidate(options) {
+  const repository = path.resolve(required(options, "--repository"));
   const candidateRoot = path.resolve(required(options, "--candidate-evidence"));
   const candidateId = required(options, "--candidate-id");
   if (!/^[0-9a-f]{64}$/.test(candidateId)) throw new ManifestCiError("candidate id must be a complete content address");
@@ -690,14 +708,45 @@ async function loadVerifiedCandidate(options) {
   const candidateIdentityRoot = path.join(candidateRoot, "candidates", candidateId);
   const overlay = await readJson(path.join(candidateIdentityRoot, "candidate-overlay.json"), "Candidate Overlay");
   const summary = await readJson(path.join(candidateIdentityRoot, "candidate-summary.json"), "candidate summary");
-  const candidate = candidateReference(candidatePlan, overlay, summary);
+  const resolved = await readJson(path.join(candidateIdentityRoot, "resolved-manifest.json"), "resolved manifest");
+  const resolvedXml = await readFile(path.join(candidateIdentityRoot, "resolved-manifest.xml"));
+  const candidate = validateResolvedCandidateIdentity(
+    candidateId, candidatePlan, overlay, resolved, resolvedXml, summary,
+  );
+  if (git(repository, ["rev-parse", "--is-shallow-repository"]).stdout.trim() !== "false") {
+    throw new ManifestCiError("Candidate provenance requires a complete Manifest Repository clone");
+  }
+  const sourceManifestXml = gitFile(repository, candidatePlan.manifestRevision, candidatePlan.manifest, true);
+  if (
+    !/^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(candidatePlan.manifest) ||
+    sourceManifestXml === undefined || !Buffer.from(sourceManifestXml).equals(resolvedXml)
+  ) {
+    throw new ManifestCiError("resolved Candidate bytes do not match the manifest revision");
+  }
+  const pullRequests = candidateRun?.pull_requests;
+  const pullRequest = Array.isArray(pullRequests) && pullRequests.length === 1 ? pullRequests[0] : undefined;
   if (
     String(candidateRun?.id) !== candidateRunId || candidateRun?.status !== "completed" ||
     candidateRun?.conclusion !== "success" || candidateRun?.event !== "pull_request" ||
-    candidateRun?.head_sha !== candidatePlan.manifestRevision ||
+    !completeOid.test(candidateRun?.head_sha) || pullRequest?.head?.sha !== candidatePlan.manifestRevision ||
+    !completeOid.test(pullRequest?.base?.sha) || pullRequest?.base?.ref !== "main" ||
+    !Number.isSafeInteger(candidateRun?.repository?.id) || candidateRun.repository.id < 1 ||
+    pullRequest?.base?.repo?.id !== candidateRun.repository.id ||
+    !Number.isSafeInteger(pullRequest?.number) || pullRequest.number < 1 ||
     candidateRun?.path !== ".github/workflows/manifest-pr.yml" ||
     candidateRun?.repository?.full_name !== "xuelongling/manifests"
   ) throw new ManifestCiError("Verified Candidate must come from the trusted Manifest PR workflow");
+  for (const controlPath of [
+    ".github/workflows/manifest-pr.yml",
+    "tools/manifest-ci.mjs",
+    "tools/network-canary.mjs",
+  ]) {
+    const trustedBytes = gitFile(repository, pullRequest.base.sha, controlPath, true);
+    const candidateBytes = gitFile(repository, pullRequest.head.sha, controlPath, true);
+    if (trustedBytes === undefined || candidateBytes === undefined || trustedBytes !== candidateBytes) {
+      throw new ManifestCiError(`Candidate changed trusted hosted proof control: ${controlPath}`);
+    }
+  }
   return {
     candidate, candidateEvidenceDigest, candidateId, candidatePlan, candidateRoot,
     candidateRun, candidateRunBytes, candidateRunId,
@@ -1084,26 +1133,9 @@ async function verdict(options) {
     const resolved = await readJson(path.join(identityRoot, "resolved-manifest.json"), `${id} resolved manifest`);
     const summary = await readJson(path.join(identityRoot, "candidate-summary.json"), `${id} candidate summary`);
     const resolvedXml = await readFile(path.join(identityRoot, "resolved-manifest.xml"));
-    if (
-      summary?.schemaVersion !== "1" || summary.overlayDigest !== digest(overlay) ||
-      summary.resolvedManifestDigest !== digest(resolved) || summary.resolvedManifestXmlSha256 !== byteDigest(resolvedXml) ||
-      summary.resolvedManifestDigest.slice("sha256:".length) !== id
-    ) {
-      throw new ManifestCiError(`${id} candidate summary does not bind the overlay and resolved manifest`);
-    }
-    const resolvedProjects = validateManifest(resolvedXml.toString("utf8"), `${id} resolved manifest XML`)
-      .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
-    if (
-      resolved?.schemaVersion !== "1" || overlay?.schemaVersion !== "1" ||
-      canonicalize(resolved.baseline) !== canonicalize(overlay.baseline) ||
-      canonicalize(resolved.projects) !== canonicalize(resolvedProjects) ||
-      candidatePlan.manifestRevision !== requireOid(candidatePlan.manifestRevision, "candidate manifest revision") ||
-      candidatePlan.baselineProductRevision !== requireOid(candidatePlan.baselineProductRevision, "baseline product revision") ||
-      resolvedProjects.find((project) => project.name === "tsfg.git")?.revision !== candidatePlan.productRevision ||
-      resolvedProjects.find((project) => project.name === ".agents.git")?.revision !== candidatePlan.agentRevision
-    ) {
-      throw new ManifestCiError(`${id} plan is not bound to its resolved manifest identity`);
-    }
+    validateResolvedCandidateIdentity(id, candidatePlan, overlay, resolved, resolvedXml, summary);
+    requireOid(candidatePlan.manifestRevision, "candidate manifest revision");
+    requireOid(candidatePlan.baselineProductRevision, "baseline product revision");
     const agent = await readJson(path.join(root, "agent", id, "report.json"), `${id} agent evidence`);
     requireSuccess(agent, `${id} agent evidence`);
     if (
@@ -1314,11 +1346,11 @@ async function main() {
     await verdict(parseOptions(arguments_, new Set(["--evidence", "--job-results", "--out"])));
   } else if (command === "candidate-proof-input") {
     await candidateProofInput(parseOptions(arguments_, new Set([
-      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id", "--out",
+      "--repository", "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id", "--out",
     ])));
   } else if (command === "offline-proof") {
     await offlineProof(parseOptions(arguments_, new Set([
-      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id",
+      "--repository", "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id",
       "--controller-run", "--controller-run-id", "--proof-evidence", "--out",
     ])));
   } else {

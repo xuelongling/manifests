@@ -35,6 +35,8 @@ test("Tier 1 Offline Proof consumes trusted candidate and controller evidence fa
   assert.match(source, /--controller-run-id "\$TSFG_PROOF_RUN_ID"/);
   assert.match(source, /--candidate-run \.ci\/candidate-run\.json/);
   assert.match(source, /--candidate-run-id "\$TSFG_CANDIDATE_RUN_ID"/);
+  assert.match(source, /refs\/pull\/\$candidate_pr\/head:refs\/tsfg-proof\/candidate/);
+  assert.match(source, /--repository \./);
   assert.doesNotMatch(source, /run:[\s\S]*actions\/runs\/\$\{\{/);
   assert.match(source, /node tools\/manifest-ci\.mjs offline-proof/);
   assert.match(source, /--candidate-evidence \.ci\/candidate-evidence/);
@@ -50,7 +52,7 @@ test("Tier 1 Offline Proof consumes trusted candidate and controller evidence fa
 test("trusted controller workflow delegates only to the protected out-of-band VM host", async () => {
   const source = await readFile(controllerWorkflowPath, "utf8");
   assert.match(source, /^on:\n  workflow_dispatch:\s*$/m);
-  assert.doesNotMatch(source, /pull_request(?:_target)?|\bsecrets\b/i);
+  assert.doesNotMatch(source, /^  pull_request(?:_target)?:|\bsecrets\b/im);
   assert.match(source, /^permissions:\n  actions: read\n  contents: read$/m);
   assert.match(source, /runs-on: \[self-hosted, tsfg-tier1-vm-controller\]/);
   assert.match(source, /TSFG_CONTROLLER_EXECUTABLE: \$\{\{ vars\.TSFG_TIER1_VM_CONTROLLER \}\}/);
@@ -60,6 +62,8 @@ test("trusted controller workflow delegates only to the protected out-of-band VM
   assert.match(source, /--out \.ci\/proof-evidence/);
   assert.match(source, /manifest-ci\.mjs candidate-proof-input/);
   assert.match(source, /--candidate-run \.ci\/candidate-run\.json/);
+  assert.match(source, /refs\/pull\/\$candidate_pr\/head:refs\/tsfg-proof\/candidate/);
+  assert.match(source, /--repository \./);
   assert.match(source, /name: tier1-vm-controller-\$\{\{ inputs\.candidate_id \}\}/);
   for (const reference of [...source.matchAll(/^\s*- uses:\s*([^\s#]+)/gm)].map((match) => match[1])) {
     assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/);
