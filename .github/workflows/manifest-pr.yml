@@ -1,0 +1,440 @@
+# SPDX-License-Identifier: MIT
+
+name: Manifest PR
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24.20.0
+  PNPM_VERSION: 11.25.0
+  TSFG_MANIFEST_URL: https://github.com/xuelongling/manifests.git
+  TSFG_REPO_LAUNCHER_SHA256: 1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f
+  LINUX_RUNNER: ubuntu-24.04
+  WINDOWS_RUNNER: windows-2025
+
+jobs:
+  repository-gate:
+    name: manifest repository gate
+    runs-on: ubuntu-24.04
+    outputs:
+      candidates: ${{ steps.plan.outputs.candidates }}
+      has-candidates: ${{ steps.plan.outputs.has-candidates }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Repository format and test gates
+        shell: bash
+        run: |
+          git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          node --test tests/manifest-ci.test.mjs tests/manifest-pr-workflow.test.mjs
+      - name: Compare manifest history and plan candidates
+        shell: bash
+        run: node tools/manifest-ci.mjs gate --repository . --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}" --out .ci/manifest-gate
+      - name: Require complete manifest identity evidence
+        shell: bash
+        run: |
+          node --input-type=module -e "import {access,readFile} from 'node:fs/promises'; import {join} from 'node:path'; const root='.ci/manifest-gate'; const plan=JSON.parse(await readFile(join(root,'manifest-plan.json'),'utf8')); for (const candidate of plan.candidates) for (const name of ['candidate-overlay.json','candidate-summary.json','resolved-manifest.json','resolved-manifest.xml']) await access(join(root,'candidates',candidate.id,name))"
+      - name: Publish the candidate matrix
+        id: plan
+        shell: bash
+        run: |
+          candidates=$(node -e "const plan=require('./.ci/manifest-gate/manifest-plan.json'); process.stdout.write(JSON.stringify(plan.candidates))")
+          count=$(node -e "const plan=require('./.ci/manifest-gate/manifest-plan.json'); process.stdout.write(String(plan.candidates.length))")
+          echo "candidates=$candidates" >> "$GITHUB_OUTPUT"
+          if [ "$count" -gt 0 ]; then
+            echo "has-candidates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-candidates=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-gate-${{ github.event.pull_request.head.sha }}
+          path: .ci/manifest-gate/
+          retention-days: 90
+
+  agent-evidence:
+    name: agent / ${{ matrix.candidate.id }}
+    needs: [repository-gate]
+    if: needs.repository-gate.outputs.has-candidates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.repository-gate.outputs.candidates) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          path: .ci/agents
+          persist-credentials: false
+          ref: ${{ matrix.candidate.agentRevision }}
+          repository: xuelongling/.agents
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install locked Agent Infrastructure dependencies
+        working-directory: .ci/agents
+        run: corepack pnpm@11.25.0 install --frozen-lockfile
+      - name: Verify Agent Infrastructure
+        working-directory: .ci/agents
+        run: corepack pnpm@11.25.0 verify
+      - name: Record candidate-bound agent evidence
+        env:
+          TSFG_AGENT_CHANGED: ${{ matrix.candidate.agentChanged }}
+          TSFG_AGENT_REVISION: ${{ matrix.candidate.agentRevision }}
+          TSFG_CANDIDATE_ID: ${{ matrix.candidate.id }}
+        shell: bash
+        run: |
+          root=".ci/evidence/agent/${{ matrix.candidate.id }}"
+          mkdir -p "$root"
+          node --input-type=module -e "import {writeFileSync} from 'node:fs'; writeFileSync(process.argv[1], JSON.stringify({agentChanged:process.env.TSFG_AGENT_CHANGED==='true',agentRevision:process.env.TSFG_AGENT_REVISION,candidateId:process.env.TSFG_CANDIDATE_ID,command:'corepack pnpm@11.25.0 verify',schemaVersion:'1',status:'success'})+'\n')" ".ci/evidence/agent/${{ matrix.candidate.id }}/report.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-agent-${{ matrix.candidate.id }}-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  workspace-verification:
+    name: workspace / ${{ matrix.candidate.id }}
+    needs: [repository-gate]
+    if: needs.repository-gate.outputs.has-candidates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.repository-gate.outputs.candidates) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify the pinned Repo launcher
+        shell: bash
+        run: |
+          mkdir -p .ci/bootstrap "$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/workspace"
+          curl --fail --location --silent --show-error https://storage.googleapis.com/git-repo-downloads/repo-2.65 --output .ci/bootstrap/repo.py
+          echo "$TSFG_REPO_LAUNCHER_SHA256  .ci/bootstrap/repo.py" | sha256sum --check --strict
+      - name: Materialize and verify the resolved candidate
+        shell: bash
+        run: |
+          workspace="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/workspace"
+          root="$GITHUB_WORKSPACE/.ci/evidence/workspace/${{ matrix.candidate.id }}"
+          mkdir -p "$root"
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$TSFG_MANIFEST_URL" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
+          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace "$workspace" > "$root/materialized-identity.json"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/tool-cache"
+          export TSFG_BOOTSTRAP_NODE="$(command -v node)"
+          export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          manifest_revision=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')).manifestRevision)" "$root/materialized-identity.json")
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "$manifest_revision" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-workspace-${{ matrix.candidate.id }}-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  product-build:
+    name: ${{ matrix.candidate.id }} / ${{ matrix.target }} / ${{ matrix.profile }} / producer-${{ matrix.producer }}
+    needs: [repository-gate, agent-evidence, workspace-verification]
+    if: needs.repository-gate.outputs.has-candidates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.repository-gate.outputs.candidates) }}
+        target: [linux-x86_64-gnu, windows-x86_64-msvc]
+        profile: [debug, release]
+        producer: [a, b]
+    runs-on: ${{ matrix.target == 'linux-x86_64-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify the pinned Repo launcher on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p .ci/bootstrap "$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          curl --fail --location --silent --show-error https://storage.googleapis.com/git-repo-downloads/repo-2.65 --output .ci/bootstrap/repo.py
+          echo "$TSFG_REPO_LAUNCHER_SHA256  .ci/bootstrap/repo.py" | sha256sum --check --strict
+      - name: Verify the pinned Repo launcher on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .ci/bootstrap, "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace" -Force | Out-Null
+          Invoke-WebRequest -Uri https://storage.googleapis.com/git-repo-downloads/repo-2.65 -OutFile .ci/bootstrap/repo.py
+          $actual = (Get-FileHash -LiteralPath .ci/bootstrap/repo.py -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:TSFG_REPO_LAUNCHER_SHA256) { throw "repo launcher digest mismatch" }
+          Copy-Item -LiteralPath repo.cmd -Destination .ci/bootstrap/repo.cmd
+      - name: Materialize the resolved candidate on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          workspace="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$TSFG_MANIFEST_URL" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
+          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace "$workspace" > .ci/materialized-identity.json
+      - name: Materialize the resolved candidate on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $workspace = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          Push-Location $workspace
+          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" init -u $env:TSFG_MANIFEST_URL -b '${{ matrix.candidate.manifestRevision }}' -m '${{ matrix.candidate.manifest }}' --repo-rev=v2.65
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" sync --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          node "$workspace/.agents/tools/materialize-agent-workspace.ts" --workspace $workspace | Out-File .ci/materialized-identity.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build, test, and package on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          workspace="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          root="$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/${{ matrix.producer }}"
+          build_output="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/build-${{ matrix.profile }}"
+          package_output="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/package-${{ matrix.profile }}"
+          mkdir -p "$root/package"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-tool-cache/${{ matrix.target }}"
+          export TSFG_BOOTSTRAP_NODE="$(command -v node)"
+          export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          manifest_revision=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('.ci/materialized-identity.json','utf8')).manifestRevision)")
+          "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "$manifest_revision" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
+          "$workspace/tsfg/eng/tsfg-build" build --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/build-report.json"
+          "$workspace/tsfg/eng/tsfg-build" test --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --out "$build_output" --report "$root/test-report.json"
+          "$workspace/tsfg/eng/tsfg-build" package --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" --workspace "$workspace/tsfg" --input "$build_output" --out "$package_output" --report "$root/package-report.json"
+          cp -a "$(realpath "$package_output")/." "$root/package/"
+          TSFG_BINDING_ROOT="$root" TSFG_CANDIDATE_ID="${{ matrix.candidate.id }}" TSFG_PRODUCT_REVISION="${{ matrix.candidate.productRevision }}" node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises'; import {join} from 'node:path'; const report=JSON.parse(await readFile(join(process.env.TSFG_BINDING_ROOT,'package-report.json'),'utf8')); await writeFile(join(process.env.TSFG_BINDING_ROOT,'candidate-binding.json'),JSON.stringify({buildIdentityDigest:report.result.buildIdentity.digest,candidateId:process.env.TSFG_CANDIDATE_ID,productRevision:process.env.TSFG_PRODUCT_REVISION,schemaVersion:'1'})+'\n')"
+      - name: Build, test, and package on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $workspace = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
+          $root = "$env:GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/${{ matrix.producer }}"
+          $buildOutput = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/build-${{ matrix.profile }}"
+          $packageOutput = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/package-${{ matrix.profile }}"
+          New-Item -ItemType Directory -Path "$root/package" -Force | Out-Null
+          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-tool-cache/${{ matrix.target }}"
+          $env:TSFG_BOOTSTRAP_NODE = (Get-Command node.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_NODE_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_NODE -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
+          & "$workspace/tsfg/eng/tsfg-build.cmd" prefetch --report "$root/prefetch-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $materialized = Get-Content -Raw .ci/materialized-identity.json | ConvertFrom-Json
+          & "$workspace/tsfg/eng/tsfg-build.cmd" verify-workspace --workspace $workspace --manifest-url $env:TSFG_MANIFEST_URL --manifest-revision $materialized.manifestRevision --manifest '${{ matrix.candidate.manifest }}' --report "$root/workspace-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$workspace/tsfg/eng/tsfg-build.cmd" build --target '${{ matrix.target }}' --profile '${{ matrix.profile }}' --workspace "$workspace/tsfg" --out $buildOutput --report "$root/build-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$workspace/tsfg/eng/tsfg-build.cmd" test --target '${{ matrix.target }}' --profile '${{ matrix.profile }}' --workspace "$workspace/tsfg" --out $buildOutput --report "$root/test-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$workspace/tsfg/eng/tsfg-build.cmd" package --target '${{ matrix.target }}' --profile '${{ matrix.profile }}' --workspace "$workspace/tsfg" --input $buildOutput --out $packageOutput --report "$root/package-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -Path "$packageOutput/*" -Destination "$root/package" -Recurse -Force
+          $env:TSFG_BINDING_ROOT = $root
+          $env:TSFG_CANDIDATE_ID = '${{ matrix.candidate.id }}'
+          $env:TSFG_PRODUCT_REVISION = '${{ matrix.candidate.productRevision }}'
+          node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises'; import {join} from 'node:path'; const report=JSON.parse(await readFile(join(process.env.TSFG_BINDING_ROOT,'package-report.json'),'utf8')); await writeFile(join(process.env.TSFG_BINDING_ROOT,'candidate-binding.json'),JSON.stringify({buildIdentityDigest:report.result.buildIdentity.digest,candidateId:process.env.TSFG_CANDIDATE_ID,productRevision:process.env.TSFG_PRODUCT_REVISION,schemaVersion:'1'})+'\n')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-producer-${{ matrix.candidate.id }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.producer }}-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  compatibility:
+    name: compatibility / ${{ matrix.candidate.id }} / ${{ matrix.target }}
+    needs: [repository-gate, workspace-verification, product-build]
+    if: needs.repository-gate.outputs.has-candidates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.repository-gate.outputs.candidates) }}
+        target: [linux-x86_64-gnu, windows-x86_64-msvc]
+    runs-on: ${{ matrix.target == 'linux-x86_64-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          path: .ci/product
+          persist-credentials: false
+          ref: ${{ matrix.candidate.productRevision }}
+          repository: xuelongling/tsfg
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Create baseline and candidate compatibility artifacts
+        env:
+          TSFG_CANDIDATE_PRODUCT_REVISION: ${{ matrix.candidate.productRevision }}
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
+          mkdir -p "$input" ".ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}"
+          TSFG_COMPATIBILITY_INPUT="$input" node --input-type=module -e "import {writeFile} from 'node:fs/promises'; import {join} from 'node:path'; import {baselineSyntheticArtifact,candidateSyntheticArtifact} from './.ci/product/tests/r00/contract-compatibility-fixtures.mjs'; const baseline=baselineSyntheticArtifact(); const candidate=candidateSyntheticArtifact(); candidate.product.commitOid=process.env.TSFG_CANDIDATE_PRODUCT_REVISION; await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'baseline.json'),JSON.stringify(baseline)+'\n'); await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'candidate.json'),JSON.stringify(candidate)+'\n')"
+      - name: Execute baseline/baseline, candidate/baseline, baseline/candidate, and candidate/candidate
+        shell: bash
+        run: |
+          input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
+          report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
+          node --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
+            --compatibility-baseline "$input/baseline.json" \
+            --compatibility-candidate "$input/candidate.json" \
+            --report "$report"
+          cp "$input"/*.json ".ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-compatibility-${{ matrix.candidate.id }}-${{ matrix.target }}-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  reproducibility:
+    name: reproducibility / ${{ matrix.candidate.id }} / ${{ matrix.target }} / ${{ matrix.profile }}
+    needs: [repository-gate, product-build]
+    if: needs.repository-gate.outputs.has-candidates == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.repository-gate.outputs.candidates) }}
+        target: [linux-x86_64-gnu, windows-x86_64-msvc]
+        profile: [debug, release]
+    runs-on: ${{ matrix.target == 'linux-x86_64-gnu' && 'ubuntu-24.04' || 'windows-2025' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          path: .ci/product
+          persist-credentials: false
+          ref: ${{ matrix.candidate.productRevision }}
+          repository: xuelongling/tsfg
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          merge-multiple: true
+          path: .ci/evidence
+          pattern: manifest-producer-${{ matrix.candidate.id }}-${{ matrix.target }}-${{ matrix.profile }}-*-${{ github.event.pull_request.head.sha }}
+      - name: Compare the independent Linux producers without building
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          root="$GITHUB_WORKSPACE/.ci/evidence/reproducibility/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}"
+          mkdir -p "$root"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-repro-tool-cache/${{ matrix.target }}"
+          export TSFG_BOOTSTRAP_NODE="$(command -v node)"
+          export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          ".ci/product/eng/tsfg-build" repro-check --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" \
+            --producer-a "$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/a/package" \
+            --producer-b "$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/b/package" \
+            --workspace "$GITHUB_WORKSPACE/.ci/product" \
+            --report ".ci/evidence/reproducibility/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/report.json"
+          rm -rf ".ci/evidence/producers"
+      - name: Compare the independent Windows producers without building
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = "$env:GITHUB_WORKSPACE/.ci/evidence/reproducibility/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}"
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-repro-tool-cache/${{ matrix.target }}"
+          $env:TSFG_BOOTSTRAP_NODE = (Get-Command node.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_NODE_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_NODE -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
+          & ".ci/product/eng/tsfg-build.cmd" prefetch --report "$root/prefetch-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ".ci/product/eng/tsfg-build.cmd" repro-check --target '${{ matrix.target }}' --profile '${{ matrix.profile }}' --producer-a "$env:GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/a/package" --producer-b "$env:GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/b/package" --workspace "$env:GITHUB_WORKSPACE/.ci/product" --report ".ci/evidence/reproducibility/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item -LiteralPath .ci/evidence/producers -Recurse -Force
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-reproducibility-${{ matrix.candidate.id }}-${{ matrix.target }}-${{ matrix.profile }}-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  candidate-evidence:
+    name: candidate evidence
+    needs: [repository-gate, agent-evidence, workspace-verification, product-build, compatibility, reproducibility]
+    if: always() && needs.repository-gate.outputs.has-candidates == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          merge-multiple: true
+          path: .ci/evidence
+          pattern: manifest-*-${{ github.event.pull_request.head.sha }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: manifest-candidate-evidence-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence/
+          retention-days: 90
+
+  manifest-verdict:
+    name: Manifest Candidate Verdict
+    if: ${{ always() }}
+    needs: [repository-gate, agent-evidence, workspace-verification, product-build, compatibility, reproducibility, candidate-evidence]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: manifest-candidate-evidence-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: manifest-gate-${{ github.event.pull_request.head.sha }}
+          path: .ci/evidence
+      - name: Record all required job conclusions
+        shell: bash
+        run: |
+          mkdir -p .ci
+          cat > .ci/job-results.json <<'JSON'
+          {"agent-ci":"${{ needs.agent-evidence.result }}","candidate-evidence":"${{ needs.candidate-evidence.result }}","compatibility":"${{ needs.compatibility.result }}","manifest-gate":"${{ needs.repository-gate.result }}","product-build":"${{ needs.product-build.result }}","reproducibility":"${{ needs.reproducibility.result }}","workspace-verification":"${{ needs.workspace-verification.result }}"}
+          JSON
+      - name: Fail closed unless every planned candidate has complete evidence
+        run: node tools/manifest-ci.mjs verdict --evidence .ci/evidence --job-results .ci/job-results.json --out .ci/manifest-verdict.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          if-no-files-found: warn
+          name: manifest-verdict-${{ github.event.pull_request.head.sha }}
+          path: .ci/manifest-verdict.json
+          retention-days: 90
