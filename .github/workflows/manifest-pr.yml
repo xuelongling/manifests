@@ -194,9 +194,11 @@ jobs:
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/tool-cache"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          export TSFG_BOOTSTRAP_GIT="$(command -v git)"
+          export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
               ip link set lo up
               exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
             ' bash "$(id -u)" "$(id -g)" "$@"
@@ -283,9 +285,11 @@ jobs:
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-tool-cache/${{ matrix.target }}"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          export TSFG_BOOTSTRAP_GIT="$(command -v git)"
+          export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
               ip link set lo up
               exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
             ' bash "$(id -u)" "$(id -g)" "$@"
@@ -435,9 +439,11 @@ jobs:
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-repro-tool-cache/${{ matrix.target }}"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          export TSFG_BOOTSTRAP_GIT="$(command -v git)"
+          export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
               ip link set lo up
               exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
             ' bash "$(id -u)" "$(id -g)" "$@"

@@ -188,6 +188,16 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   assert.match(job(source, "reproducibility"), /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
 });
 
+test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git", async () => {
+  const source = await workflow();
+  for (const jobName of ["workspace-verification", "product-build", "reproducibility"]) {
+    const linuxJob = job(source, jobName);
+    assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
+    assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
+    assert.match(linuxJob, /--preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256/);
+  }
+});
+
 test("Linux candidate builds publish candidate-bound canaries from before and after the offline chain", async () => {
   const source = await workflow();
   const build = job(source, "product-build");
