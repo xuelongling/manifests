@@ -10,11 +10,8 @@ permissions:
 
 env:
   NODE_VERSION: 24.20.0
-  PNPM_VERSION: 11.25.0
   TSFG_MANIFEST_URL: https://github.com/xuelongling/manifests.git
   TSFG_REPO_LAUNCHER_SHA256: 1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f
-  LINUX_RUNNER: ubuntu-24.04
-  WINDOWS_RUNNER: windows-2025
 
 jobs:
   repository-gate:
