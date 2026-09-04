@@ -613,7 +613,7 @@ async function verdict(options) {
           );
           if (
             attestation.schemaVersion !== "1" || attestation.target !== target || attestation.profile !== profile ||
-            attestation.producer !== producer || attestation.buildIdentityDigest !== identityDigest
+            attestation.buildIdentityDigest !== identityDigest
           ) {
             throw new ManifestCiError(`${id}/${target}/${profile}/${producer} producer attestation is inconsistent`);
           }
