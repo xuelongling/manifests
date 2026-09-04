@@ -202,7 +202,8 @@ Integration Owners create transient Candidate Overlay evidence with the public
 manifest CI command. The baseline argument is always a complete Manifest
 Repository commit OID; before the first Stable it must be the published
 Bootstrap Integration Snapshot above, and after that it must contain a
-`default.xml` byte-identical to an immutable versioned snapshot.
+`default.xml` byte-identical to an immutable versioned snapshot and be the
+repository's current checked-out Stable identity.
 
 ```powershell
 node tools/manifest-ci.mjs candidate `
@@ -222,6 +223,9 @@ The Manifest PR workflow runs `manifest-ci.mjs gate` against the trusted PR base
 and candidate head. This independently compares Git history for bootstrap and
 versioned snapshot immutability, validates the complete R00 project and Agent
 Activation Surface shape, and emits the resolved candidates consumed by the
-product and agent matrices. `manifest-ci.mjs tag-policy` compares trusted tag
-ref maps and rejects release tag movement or deletion fixtures; repository
-ruleset protection remains a separate required control.
+product and agent matrices. Candidate directories use the complete resolved
+manifest digest, and the final verdict checks that policy, workspace,
+compatibility, build, package, attestation, and reproducibility reports all
+bind to that exact resolved candidate. `manifest-ci.mjs tag-policy` compares
+trusted tag ref maps and rejects release tag movement or deletion fixtures;
+repository ruleset protection remains a separate required control.

@@ -79,6 +79,27 @@ async function writeJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value)}\n`);
 }
 
+function workspaceReport(candidate, resolved) {
+  return {
+    command: "verify-workspace",
+    result: {
+      manifest: {
+        repositoryUrl: resolved.baseline.repository,
+        revision: candidate.manifestRevision,
+        selected: candidate.manifest,
+      },
+      projects: resolved.projects.map((project) => ({
+        dirty: false,
+        head: project.revision,
+        id: project.name,
+        path: project.path,
+      })),
+    },
+    schemaVersion: "1",
+    status: "success",
+  };
+}
+
 test("candidate overlay replaces one baseline project by complete OID and publishes canonical evidence", async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-candidate-"));
   const output = path.join(sandbox, "candidate");
@@ -155,7 +176,7 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
       productChanged: true,
       productRevision: nextProduct,
     });
-    assert.match(plan.candidates[0].id, /^[0-9a-f]{16}$/);
+    assert.match(plan.candidates[0].id, /^[0-9a-f]{64}$/);
     const candidateRoot = path.join(output, "candidates", plan.candidates[0].id);
     const overlay = JSON.parse(await readFile(path.join(candidateRoot, "candidate-overlay.json"), "utf8"));
     assert.deepEqual(overlay.replacements, [{ project: "tsfg.git", revision: nextProduct }]);
@@ -277,7 +298,7 @@ test("manifest verdict requires every product and agent evidence lane before dec
         { name: "tsfg.git", path: "tsfg", revision: productRevision },
       ], schemaVersion: "1",
     };
-    const identity = digest(resolved).slice("sha256:".length, "sha256:".length + 16);
+    const identity = digest(resolved).slice("sha256:".length);
     const candidate = {
       agentChanged: false,
       agentRevision,
@@ -300,25 +321,81 @@ test("manifest verdict requires every product and agent evidence lane before dec
       resolvedManifestXmlSha256: byteDigest(manifest(productRevision, agentRevision)),
       schemaVersion: "1",
     });
-    await writeJson(path.join(evidence, "agent", identity, "report.json"), success);
-    await writeJson(path.join(evidence, "workspace", identity, "report.json"), { command: "verify-workspace", ...success });
+    await writeJson(path.join(evidence, "agent", identity, "report.json"), {
+      agentChanged: false,
+      agentRevision,
+      candidateId: identity,
+      command: "corepack pnpm@11.25.0 verify",
+      ...success,
+    });
+    await writeJson(path.join(evidence, "repository-gates", identity, "report.json"), {
+      candidateId: identity,
+      gates: { format: "passed", license: "passed", lock: "passed", policy: "passed" },
+      productRevision,
+      ...success,
+    });
+    await writeJson(path.join(evidence, "workspace", identity, "report.json"), workspaceReport(candidate, resolved));
     for (const target of ["linux-x86_64-gnu", "windows-x86_64-msvc"]) {
-      await writeJson(path.join(evidence, "compatibility", identity, target, "report.json"), { command: "test", ...success });
+      await writeJson(path.join(evidence, "compatibility", identity, target, "report.json"), {
+        command: "test",
+        result: {
+          contractSet: { canonical: "{}", id: byteDigest("{}") },
+          compatibility: {
+            artifacts: { candidate: { productOid: productRevision } },
+            combinations: [
+              { consumer: "baseline", producer: "baseline", status: "passed" },
+              { consumer: "baseline", producer: "candidate", status: "passed" },
+              { consumer: "candidate", producer: "baseline", status: "passed" },
+              { consumer: "candidate", producer: "candidate", status: "passed" },
+            ],
+          },
+          target,
+        },
+        ...success,
+      });
       for (const profile of ["debug", "release"]) {
+        const buildIdentityDigest = byteDigest(`${identity}/${target}/${profile}`);
         for (const producer of ["a", "b"]) {
           const root = path.join(evidence, "producers", identity, target, profile, producer);
-          await writeJson(path.join(root, "build-report.json"), { command: "build", ...success });
-          await writeJson(path.join(root, "test-report.json"), { command: "test", ...success });
-          await writeJson(path.join(root, "package-report.json"), { command: "package", ...success });
+          await writeJson(path.join(root, "workspace-report.json"), workspaceReport(candidate, resolved));
+          for (const [command, file] of [["build", "build-report.json"], ["test", "test-report.json"]]) {
+            await writeJson(path.join(root, file), {
+              command,
+              result: { buildIdentity: { digest: buildIdentityDigest }, profile, target },
+              ...success,
+            });
+          }
+          const archive = `tsfg-${target}-${profile}.archive`;
+          await writeJson(path.join(root, "package-report.json"), {
+            command: "package",
+            result: { archive, buildIdentity: { digest: buildIdentityDigest, profile, target } },
+            ...success,
+          });
+          await mkdir(path.join(root, "package"), { recursive: true });
+          await writeFile(path.join(root, "package", archive), `${target}/${profile}\n`);
+          await writeJson(path.join(root, "package", `${archive}.checksums.json`), { schemaVersion: "1" });
+          await writeJson(path.join(root, "package", "producer-attestation.json"), {
+            buildIdentityDigest,
+            profile,
+            producer,
+            schemaVersion: "1",
+            target,
+          });
+          await writeJson(path.join(root, "candidate-binding.json"), {
+            buildIdentityDigest,
+            candidateId: identity,
+            productRevision,
+            schemaVersion: "1",
+          });
         }
         await writeJson(path.join(evidence, "reproducibility", identity, target, profile, "report.json"), {
-          command: "repro-check", result: { buildExecuted: false }, ...success,
+          command: "repro-check", result: { buildExecuted: false, profile, producers: [{}, {}], target }, ...success,
         });
       }
     }
     const jobs = {
       "agent-ci": "success", "candidate-evidence": "success", compatibility: "success", "manifest-gate": "success",
-      "product-build": "success", reproducibility: "success", "workspace-verification": "success",
+      "product-build": "success", "repository-gates": "success", reproducibility: "success", "workspace-verification": "success",
     };
     const jobsPath = path.join(sandbox, "jobs.json");
     const output = path.join(sandbox, "verdict.json");
@@ -333,6 +410,33 @@ test("manifest verdict requires every product and agent evidence lane before dec
     assert.equal(verdict.requiredEvidence.producers, "8/8");
     assert.equal(verdict.requiredEvidence.reproducibility, "4/4");
     assert.match(verdict.evidenceDigest, /^sha256:[0-9a-f]{64}$/);
+
+    const foreignWorkspace = workspaceReport(candidate, resolved);
+    foreignWorkspace.result.projects.find((project) => project.id === "tsfg.git").head = "9".repeat(40);
+    await writeJson(path.join(evidence, "workspace", identity, "report.json"), foreignWorkspace);
+    const foreignOutput = path.join(sandbox, "foreign.json");
+    const foreign = invoke([
+      "verdict", "--evidence", evidence, "--job-results", jobsPath, "--out", foreignOutput,
+    ]);
+    assert.equal(foreign.status, 1);
+    assert.match(foreign.stderr, /not bound to the resolved Candidate Overlay/i);
+    await assert.rejects(readFile(foreignOutput));
+    await writeJson(path.join(evidence, "workspace", identity, "report.json"), workspaceReport(candidate, resolved));
+
+    const bindingPath = path.join(evidence, "producers", identity, "linux-x86_64-gnu", "debug", "a", "candidate-binding.json");
+    await writeJson(bindingPath, {
+      buildIdentityDigest: byteDigest(`${identity}/linux-x86_64-gnu/debug`),
+      candidateId: "0".repeat(64),
+      productRevision,
+      schemaVersion: "1",
+    });
+    const foreignBindingOutput = path.join(sandbox, "foreign-binding.json");
+    const foreignBinding = invoke([
+      "verdict", "--evidence", evidence, "--job-results", jobsPath, "--out", foreignBindingOutput,
+    ]);
+    assert.equal(foreignBinding.status, 1);
+    assert.match(foreignBinding.stderr, /not bound to the manifest candidate/i);
+    await assert.rejects(readFile(foreignBindingOutput));
 
     await writeJson(jobsPath, { ...jobs, reproducibility: "cancelled" });
     const rejectedOutput = path.join(sandbox, "rejected.json");
@@ -358,7 +462,7 @@ test("manifest verdict records a repository-only PR without claiming a verified 
     });
     await writeJson(jobsPath, {
       "agent-ci": "skipped", "candidate-evidence": "skipped", compatibility: "skipped",
-      "manifest-gate": "success", "product-build": "skipped", reproducibility: "skipped",
+      "manifest-gate": "success", "product-build": "skipped", "repository-gates": "skipped", reproducibility: "skipped",
       "workspace-verification": "skipped",
     });
     const result = invoke([
@@ -390,6 +494,10 @@ test("resolved manifests reject floating revisions, shallow clones, extra projec
     ["agent linkfile", valid.replace(
       "  </project>",
       '    <linkfile src="extra" dest="extra" />\n  </project>',
+    )],
+    ["nested project", valid.replace(
+      `revision="${product}" upstream="refs/heads/main" />`,
+      `revision="${product}" upstream="refs/heads/main"><project name="hidden.git" path="hidden" remote="github-xuelongling" revision="${"3".repeat(40)}" upstream="refs/heads/main" /></project>`,
     )],
   ]);
   for (const [name, candidateManifest] of variants) {
@@ -462,5 +570,56 @@ test("candidate baseline switches to a default that resolves to an immutable Sta
     } finally {
       await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
+  }
+});
+
+test("manifest PR gate cannot create or drift the first Stable default in this milestone", async () => {
+  const product = "1".repeat(40);
+  const agent = "2".repeat(40);
+  for (const mutation of ["create", "drift"]) {
+    const sandbox = await mkdtemp(path.join(tmpdir(), `tsfg-manifest-default-${mutation}-`));
+    try {
+      await initializeRepository(sandbox, manifest(product, agent));
+      if (mutation === "drift") {
+        await mkdir(path.join(sandbox, "snapshots"));
+        const stable = manifest(product, agent);
+        await writeFile(path.join(sandbox, "snapshots", "tsfg-v0.1.0.xml"), stable);
+        await writeFile(path.join(sandbox, "default.xml"), stable);
+        commitAll(sandbox, "existing stable");
+      }
+      const base = runGit(sandbox, "rev-parse", "HEAD");
+      await writeFile(path.join(sandbox, "default.xml"), manifest("3".repeat(40), agent));
+      const head = commitAll(sandbox, `${mutation} default`);
+      const result = invoke([
+        "gate", "--repository", sandbox, "--base", base, "--head", head,
+        "--out", path.join(sandbox, "evidence"),
+      ], sandbox);
+      assert.equal(result.status, 1, `${mutation} unexpectedly passed`);
+      assert.match(result.stderr, /default\.xml.*(?:Stable|snapshot)/i);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }
+});
+
+test("candidate Stable baseline must be the repository's current default identity", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-current-stable-"));
+  try {
+    await initializeRepository(sandbox, manifest("1".repeat(40), "2".repeat(40)));
+    await mkdir(path.join(sandbox, "snapshots"));
+    const stable = manifest("1".repeat(40), "2".repeat(40));
+    await writeFile(path.join(sandbox, "snapshots", "tsfg-v0.1.0.xml"), stable);
+    await writeFile(path.join(sandbox, "default.xml"), stable);
+    const historicalStable = commitAll(sandbox, "stable");
+    await writeFile(path.join(sandbox, "README.md"), "newer manifest repository state\n");
+    commitAll(sandbox, "advance current identity");
+    const result = invoke([
+      "candidate", "--repository", sandbox, "--baseline-revision", historicalStable,
+      "--replacement", `tsfg.git=${"3".repeat(40)}`, "--out", path.join(sandbox, "candidate"),
+    ], sandbox);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /current Stable/i);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
