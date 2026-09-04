@@ -627,11 +627,55 @@ function requireCommonProof(report, candidate, target, profile, expected, label)
   requireCandidateReference(report.candidate, candidate, label);
 }
 
+const linuxProofSourceFiles = {
+  controllerAttestationSha256: "controller-attestation.json",
+  isolationAttestationSha256: "isolation-attestation.json",
+  osAttestationSha256: "os-attestation.json",
+  packageReportSha256: "package-report.json",
+  runtimeReportSha256: "runtime-report.json",
+};
+
+const windowsProofSourceFiles = {
+  buildReportSha256: "build-report.json",
+  cacheVerificationReportSha256: "cache-verification-report.json",
+  controllerAttestationSha256: "controller-attestation.json",
+  environmentAttestationSha256: "environment-attestation.json",
+  packageReportSha256: "package-report.json",
+  runtimeReportSha256: "runtime-report.json",
+  testReportSha256: "test-report.json",
+  virtualNetworkAttestationSha256: "virtual-network-attestation.json",
+  workspaceReportSha256: "workspace-report.json",
+};
+
+async function requireRetainedSourceReports(root, sources, sourceFiles, label) {
+  requireFields(sources, Object.keys(sourceFiles), `${label} sources`);
+  for (const [field, fileName] of Object.entries(sourceFiles)) {
+    const expected = sources[field];
+    requireDigest(expected, `${label} ${field}`);
+    const actual = byteDigest(await readFile(path.join(root, "sources", fileName)));
+    if (actual !== expected) {
+      throw new ManifestCiError(`${label} retained source report digest does not match ${fileName}`);
+    }
+  }
+}
+
 async function offlineProof(options) {
   const candidateRoot = path.resolve(required(options, "--candidate-evidence"));
   const proofRoot = path.resolve(required(options, "--proof-evidence"));
   const candidateId = required(options, "--candidate-id");
   if (!/^[0-9a-f]{64}$/.test(candidateId)) throw new ManifestCiError("candidate id must be a complete content address");
+  const controllerRunId = required(options, "--controller-run-id");
+  if (!/^[1-9][0-9]*$/.test(controllerRunId)) throw new ManifestCiError("controller run id must be a positive decimal identifier");
+  const controllerRunPath = path.resolve(required(options, "--controller-run"));
+  const controllerRunBytes = await readFile(controllerRunPath);
+  const controllerRun = await readJson(controllerRunPath, "Tier 1 VM controller run provenance");
+  if (
+    String(controllerRun?.id) !== controllerRunId || controllerRun?.status !== "completed" ||
+    controllerRun?.conclusion !== "success" || controllerRun?.event !== "workflow_dispatch" ||
+    controllerRun?.head_branch !== "main" || !completeOid.test(controllerRun?.head_sha) ||
+    controllerRun?.path !== ".github/workflows/tier1-vm-controller.yml" ||
+    controllerRun?.repository?.full_name !== "xuelongling/manifests"
+  ) throw new ManifestCiError("Offline Proof requires the trusted Tier 1 VM controller workflow on manifest main");
   const verdict = await readJson(path.resolve(required(options, "--verified-verdict")), "Verified Candidate verdict");
   const candidateEvidenceEntries = await Promise.all((await evidenceFiles(candidateRoot)).map(async (relativePath) => ({
     path: relativePath,
@@ -655,10 +699,18 @@ async function offlineProof(options) {
   const overlay = await readJson(path.join(candidateIdentityRoot, "candidate-overlay.json"), "Candidate Overlay");
   const summary = await readJson(path.join(candidateIdentityRoot, "candidate-summary.json"), "candidate summary");
   const candidate = candidateReference(candidatePlan, overlay, summary);
+  const profile = "release";
   const expectedProofFiles = [
-    ...["release"].map((profile) => `linux-minimum/${candidateId}/${profile}/report.json`),
-    ...["a", "b"].flatMap((vm) =>
-      ["release"].map((profile) => `windows/${candidateId}/${vm}/${profile}/report.json`)),
+    `linux-minimum/${candidateId}/${profile}/report.json`,
+    ...Object.values(linuxProofSourceFiles).map(
+      (fileName) => `linux-minimum/${candidateId}/${profile}/sources/${fileName}`,
+    ),
+    ...["a", "b"].flatMap((vm) => [
+      `windows/${candidateId}/${vm}/${profile}/report.json`,
+      ...Object.values(windowsProofSourceFiles).map(
+        (fileName) => `windows/${candidateId}/${vm}/${profile}/sources/${fileName}`,
+      ),
+    ]),
   ];
   const proofFiles = await evidenceFiles(proofRoot);
   if (
@@ -671,7 +723,7 @@ async function offlineProof(options) {
   const builds = [];
   const vmEvidence = new Map();
   const windowsBuildOutputs = new Set();
-  for (const profile of ["release"]) {
+  {
     const linuxExpected = await expectedCandidateBuild(candidateRoot, candidateId, "linux-x86_64-gnu", profile);
     builds.push({
       buildIdentityDigest: linuxExpected.buildIdentityDigest,
@@ -740,9 +792,12 @@ async function offlineProof(options) {
       "architecture", "attestationSha256", "distribution", "distributionVersion", "glibcVersion", "kernelRelease",
     ], `${linuxLabel} environment`);
     requireFields(linux.runtimeSmoke, ["cpp", "reportSha256", "status", "zig"], `${linuxLabel} runtime smoke`);
-    requireFields(linux.sources, [
-      "isolationAttestationSha256", "osAttestationSha256", "packageReportSha256", "runtimeReportSha256",
-    ], `${linuxLabel} sources`);
+    await requireRetainedSourceReports(
+      path.join(proofRoot, "linux-minimum", candidateId, profile),
+      linux.sources,
+      linuxProofSourceFiles,
+      linuxLabel,
+    );
     requireCommonProof(linux, candidate, "linux-x86_64-gnu", profile, linuxExpected, linuxLabel);
     requireLinuxIsolation(linux, linuxLabel);
     if (
@@ -766,7 +821,8 @@ async function offlineProof(options) {
     ]) requireDigest(value, `${linuxLabel} ${name}`);
     if (
       linux.sources.osAttestationSha256 !== linux.environment.attestationSha256 ||
-      linux.sources.runtimeReportSha256 !== linux.runtimeSmoke.reportSha256
+      linux.sources.runtimeReportSha256 !== linux.runtimeSmoke.reportSha256 ||
+      linux.sources.controllerAttestationSha256 !== linux.controller.attestationSha256
     ) throw new ManifestCiError(`${linuxLabel} source digests do not bind its attestations and runtime report`);
     linuxMinimumRuntime += 1;
 
@@ -795,11 +851,12 @@ async function offlineProof(options) {
       requireFields(report.controller, [
         "attestationSha256", "executionChannel", "networkAuthority", "sourceReportsDigest", "status",
       ], `${label} controller`);
-      requireFields(report.sources, [
-        "buildReportSha256", "cacheVerificationReportSha256", "environmentAttestationSha256",
-        "packageReportSha256", "runtimeReportSha256", "testReportSha256",
-        "virtualNetworkAttestationSha256", "workspaceReportSha256",
-      ], `${label} sources`);
+      await requireRetainedSourceReports(
+        path.join(proofRoot, "windows", candidateId, vm, profile),
+        report.sources,
+        windowsProofSourceFiles,
+        label,
+      );
       requireFields(report.cache, [
         "addressing", "cacheKey", "injectedArtifactSha256", "objectVerification", "pathDigest",
         "toolchainClosureDigest", "unexpectedObjects", "verificationReportSha256",
@@ -867,6 +924,7 @@ async function offlineProof(options) {
         report.sources.testReportSha256 !== report.commands.test.reportSha256 ||
         report.sources.virtualNetworkAttestationSha256 !== report.virtualNetwork.attestationSha256 ||
         report.sources.workspaceReportSha256 !== report.commands.workspaceVerification.reportSha256
+        || report.sources.controllerAttestationSha256 !== report.controller.attestationSha256
       ) throw new ManifestCiError(`${label} source digests do not bind its command and environment reports`);
       for (const [value, name] of [
         [report.vmIdentityDigest, "VM identity"],
@@ -914,15 +972,24 @@ async function offlineProof(options) {
     sha256: byteDigest(await readFile(path.join(proofRoot, ...relativePath.split("/")))),
   })));
   const targetOrder = new Map([["linux-x86_64-gnu", 0], ["windows-x86_64-msvc", 1]]);
-  const profileOrder = new Map([["debug", 0], ["release", 1]]);
   builds.sort((left, right) =>
-    targetOrder.get(left.target) - targetOrder.get(right.target) ||
-    profileOrder.get(left.profile) - profileOrder.get(right.profile));
+    targetOrder.get(left.target) - targetOrder.get(right.target));
   await atomicWrite(path.resolve(required(options, "--out")), jsonBytes({
     builds,
     candidate,
     candidateIds: [candidateId],
-    evidenceDigest: digest({ candidateEvidenceDigest, entries: proofEntries, schemaVersion: "1" }),
+    controllerRun: {
+      repository: controllerRun.repository.full_name,
+      runId: controllerRunId,
+      workflow: controllerRun.path,
+      workflowCommit: controllerRun.head_sha,
+    },
+    evidenceDigest: digest({
+      candidateEvidenceDigest,
+      controllerRunSha256: byteDigest(controllerRunBytes),
+      entries: proofEntries,
+      schemaVersion: "1",
+    }),
     proof: "Offline Proof",
     requiredEvidence: {
       hostedLinux: `${hostedLinux}/2`,
@@ -1200,7 +1267,8 @@ async function main() {
     await verdict(parseOptions(arguments_, new Set(["--evidence", "--job-results", "--out"])));
   } else if (command === "offline-proof") {
     await offlineProof(parseOptions(arguments_, new Set([
-      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--proof-evidence", "--out",
+      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--controller-run", "--controller-run-id",
+      "--proof-evidence", "--out",
     ])));
   } else {
     throw new ManifestCiError(`unsupported command: ${command ?? "<missing>"}`);

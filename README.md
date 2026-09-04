@@ -246,7 +246,8 @@ Agent OIDs.
 
 The `Tier 1 Offline Proof` workflow is a fail-closed evidence consumer. It does
 not claim to provision unavailable infrastructure. A trusted VM controller must
-first publish a proof artifact containing:
+first run from `.github/workflows/tier1-vm-controller.yml` on protected
+`xuelongling/manifests` `main` and publish a proof artifact containing:
 
 - Debian 12.15, glibc 2.36, 6.1-series kernel runtime smoke for the exact
   `release` profile;
@@ -259,26 +260,41 @@ first publish a proof artifact containing:
 - out-of-band controller attestations that the hypervisor disconnected every
   external guest adapter, plus blocked pre/post canaries and per-command WFP
   process isolation;
-- complete SHA-256 references to the OS, isolation, cache verification, command,
-  package, and runtime source reports. Because controller-private raw logs are
-  deliberately not archived, the controller attests the canonical digest of
-  this closed source-reference set; the validator recomputes that set digest
-  and checks each reference against its corresponding report field.
+- the exact OS, isolation, cache verification, command, package, runtime, and
+  controller attestation source reports, with complete SHA-256 references.
+  Controller-private ambient logs remain excluded; the validator accepts only
+  the declared source filenames, recomputes every report digest, and binds the
+  canonical source-reference set to its controller attestation.
 
 Only the closed JSON report schema is accepted; extra files or fields are
 rejected so controller logs, environment dumps, and credentials cannot be
-silently archived as proof. Dispatch the workflow with the prior Candidate run
-ID, its complete 64-hex candidate ID, the trusted controller run ID, and exact
-proof artifact name. Equivalently, validate already-downloaded artifacts with:
+silently archived as proof. The consumer fetches the controller run directly
+from the GitHub Actions API and requires a successful `workflow_dispatch` of
+the trusted workflow from protected `main`; a caller-selected run from any
+other workflow or branch fails. Dispatch the workflow with the prior Candidate
+run ID, its complete 64-hex candidate ID, and the trusted controller run ID;
+the proof artifact name is derived from that candidate ID rather than supplied
+by the caller. Equivalently, validate already-downloaded artifacts and an
+API-fetched controller run document with:
 
 ```powershell
 node tools/manifest-ci.mjs offline-proof `
     --candidate-evidence .ci/candidate-evidence `
     --verified-verdict .ci/verified-verdict/manifest-verdict.json `
     --candidate-id <complete-resolved-manifest-content-address> `
+    --controller-run .ci/controller-run.json `
+    --controller-run-id <trusted-controller-run-id> `
     --proof-evidence .ci/proof-evidence `
     --out .ci/offline-proof.json
 ```
 
 The result is an `Offline Proof` prerequisite only. It does not declare the
 Candidate Promotable or Stable; Owner-gated promotion remains a separate step.
+
+The trusted workflow runs only on a self-hosted runner carrying the
+`tsfg-tier1-vm-controller` label. Repository variable
+`TSFG_TIER1_VM_CONTROLLER` must be the absolute path of the host-controlled
+executable that injects the verified candidate cache, drives the short-lived
+VMs out of band, and writes the closed proof tree. Missing capacity, runner
+label, variable, executable, source report, or successful VM replay leaves no
+artifact and therefore cannot produce Offline Proof.

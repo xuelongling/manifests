@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: MIT
+
+name: Tier 1 VM Controller
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        required: true
+        type: string
+        description: Workflow run containing the Verified Candidate evidence and verdict
+      candidate_id:
+        required: true
+        type: string
+        description: Complete resolved-manifest content address to prove
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  prove-minimum-vms:
+    name: Prove minimum Tier 1 VMs
+    runs-on: [self-hosted, tsfg-tier1-vm-controller]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Download the immutable Verified Candidate evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: .ci/candidate-evidence
+          pattern: manifest-candidate-evidence-*
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download the Verified Candidate verdict
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: .ci/verified-verdict
+          pattern: manifest-verdict-*
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Replay the candidate through the isolated minimum VMs
+        env:
+          TSFG_CANDIDATE_ID: ${{ inputs.candidate_id }}
+          TSFG_CONTROLLER_EXECUTABLE: ${{ vars.TSFG_TIER1_VM_CONTROLLER }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (
+            [string]::IsNullOrWhiteSpace($env:TSFG_CONTROLLER_EXECUTABLE) -or
+            -not [IO.Path]::IsPathFullyQualified($env:TSFG_CONTROLLER_EXECUTABLE) -or
+            -not (Test-Path -LiteralPath $env:TSFG_CONTROLLER_EXECUTABLE -PathType Leaf)
+          ) {
+            throw 'TSFG_TIER1_VM_CONTROLLER must name the trusted absolute controller executable'
+          }
+          & $env:TSFG_CONTROLLER_EXECUTABLE `
+            --candidate-id $env:TSFG_CANDIDATE_ID `
+            --candidate-evidence .ci/candidate-evidence `
+            --verified-verdict .ci/verified-verdict/manifest-verdict.json `
+            --out .ci/proof-evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publish the closed VM proof artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: tier1-vm-controller-${{ inputs.candidate_id }}
+          path: .ci/proof-evidence
+          retention-days: 90
