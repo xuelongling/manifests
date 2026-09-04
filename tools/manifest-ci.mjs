@@ -659,23 +659,15 @@ async function requireRetainedSourceReports(root, sources, sourceFiles, label) {
   }
 }
 
-async function offlineProof(options) {
+async function loadVerifiedCandidate(options) {
   const candidateRoot = path.resolve(required(options, "--candidate-evidence"));
-  const proofRoot = path.resolve(required(options, "--proof-evidence"));
   const candidateId = required(options, "--candidate-id");
   if (!/^[0-9a-f]{64}$/.test(candidateId)) throw new ManifestCiError("candidate id must be a complete content address");
-  const controllerRunId = required(options, "--controller-run-id");
-  if (!/^[1-9][0-9]*$/.test(controllerRunId)) throw new ManifestCiError("controller run id must be a positive decimal identifier");
-  const controllerRunPath = path.resolve(required(options, "--controller-run"));
-  const controllerRunBytes = await readFile(controllerRunPath);
-  const controllerRun = await readJson(controllerRunPath, "Tier 1 VM controller run provenance");
-  if (
-    String(controllerRun?.id) !== controllerRunId || controllerRun?.status !== "completed" ||
-    controllerRun?.conclusion !== "success" || controllerRun?.event !== "workflow_dispatch" ||
-    controllerRun?.head_branch !== "main" || !completeOid.test(controllerRun?.head_sha) ||
-    controllerRun?.path !== ".github/workflows/tier1-vm-controller.yml" ||
-    controllerRun?.repository?.full_name !== "xuelongling/manifests"
-  ) throw new ManifestCiError("Offline Proof requires the trusted Tier 1 VM controller workflow on manifest main");
+  const candidateRunId = required(options, "--candidate-run-id");
+  if (!/^[1-9][0-9]*$/.test(candidateRunId)) throw new ManifestCiError("candidate run id must be a positive decimal identifier");
+  const candidateRunPath = path.resolve(required(options, "--candidate-run"));
+  const candidateRunBytes = await readFile(candidateRunPath);
+  const candidateRun = await readJson(candidateRunPath, "Manifest PR run provenance");
   const verdict = await readJson(path.resolve(required(options, "--verified-verdict")), "Verified Candidate verdict");
   const candidateEvidenceEntries = await Promise.all((await evidenceFiles(candidateRoot)).map(async (relativePath) => ({
     path: relativePath,
@@ -699,6 +691,54 @@ async function offlineProof(options) {
   const overlay = await readJson(path.join(candidateIdentityRoot, "candidate-overlay.json"), "Candidate Overlay");
   const summary = await readJson(path.join(candidateIdentityRoot, "candidate-summary.json"), "candidate summary");
   const candidate = candidateReference(candidatePlan, overlay, summary);
+  if (
+    String(candidateRun?.id) !== candidateRunId || candidateRun?.status !== "completed" ||
+    candidateRun?.conclusion !== "success" || candidateRun?.event !== "pull_request" ||
+    candidateRun?.head_sha !== candidatePlan.manifestRevision ||
+    candidateRun?.path !== ".github/workflows/manifest-pr.yml" ||
+    candidateRun?.repository?.full_name !== "xuelongling/manifests"
+  ) throw new ManifestCiError("Verified Candidate must come from the trusted Manifest PR workflow");
+  return {
+    candidate, candidateEvidenceDigest, candidateId, candidatePlan, candidateRoot,
+    candidateRun, candidateRunBytes, candidateRunId,
+  };
+}
+
+async function candidateProofInput(options) {
+  const verified = await loadVerifiedCandidate(options);
+  await atomicWrite(path.resolve(required(options, "--out")), jsonBytes({
+    candidate: verified.candidate,
+    candidateEvidenceDigest: verified.candidateEvidenceDigest,
+    candidateRun: {
+      repository: verified.candidateRun.repository.full_name,
+      runId: verified.candidateRunId,
+      workflow: verified.candidateRun.path,
+      workflowCommit: verified.candidateRun.head_sha,
+    },
+    proofInput: "Verified Candidate",
+    schemaVersion: "1",
+    status: "success",
+  }));
+}
+
+async function offlineProof(options) {
+  const {
+    candidate, candidateEvidenceDigest, candidateId, candidateRoot,
+    candidateRun, candidateRunBytes, candidateRunId,
+  } = await loadVerifiedCandidate(options);
+  const proofRoot = path.resolve(required(options, "--proof-evidence"));
+  const controllerRunId = required(options, "--controller-run-id");
+  if (!/^[1-9][0-9]*$/.test(controllerRunId)) throw new ManifestCiError("controller run id must be a positive decimal identifier");
+  const controllerRunPath = path.resolve(required(options, "--controller-run"));
+  const controllerRunBytes = await readFile(controllerRunPath);
+  const controllerRun = await readJson(controllerRunPath, "Tier 1 VM controller run provenance");
+  if (
+    String(controllerRun?.id) !== controllerRunId || controllerRun?.status !== "completed" ||
+    controllerRun?.conclusion !== "success" || controllerRun?.event !== "workflow_dispatch" ||
+    controllerRun?.head_branch !== "main" || !completeOid.test(controllerRun?.head_sha) ||
+    controllerRun?.path !== ".github/workflows/tier1-vm-controller.yml" ||
+    controllerRun?.repository?.full_name !== "xuelongling/manifests"
+  ) throw new ManifestCiError("Offline Proof requires the trusted Tier 1 VM controller workflow on manifest main");
   const profile = "release";
   const expectedProofFiles = [
     `linux-minimum/${candidateId}/${profile}/report.json`,
@@ -978,6 +1018,12 @@ async function offlineProof(options) {
     builds,
     candidate,
     candidateIds: [candidateId],
+    candidateRun: {
+      repository: candidateRun.repository.full_name,
+      runId: candidateRunId,
+      workflow: candidateRun.path,
+      workflowCommit: candidateRun.head_sha,
+    },
     controllerRun: {
       repository: controllerRun.repository.full_name,
       runId: controllerRunId,
@@ -986,6 +1032,7 @@ async function offlineProof(options) {
     },
     evidenceDigest: digest({
       candidateEvidenceDigest,
+      candidateRunSha256: byteDigest(candidateRunBytes),
       controllerRunSha256: byteDigest(controllerRunBytes),
       entries: proofEntries,
       schemaVersion: "1",
@@ -1265,10 +1312,14 @@ async function main() {
     await tagPolicy(parseOptions(arguments_, new Set(["--before", "--after", "--out"])));
   } else if (command === "verdict") {
     await verdict(parseOptions(arguments_, new Set(["--evidence", "--job-results", "--out"])));
+  } else if (command === "candidate-proof-input") {
+    await candidateProofInput(parseOptions(arguments_, new Set([
+      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id", "--out",
+    ])));
   } else if (command === "offline-proof") {
     await offlineProof(parseOptions(arguments_, new Set([
-      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--controller-run", "--controller-run-id",
-      "--proof-evidence", "--out",
+      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id",
+      "--controller-run", "--controller-run-id", "--proof-evidence", "--out",
     ])));
   } else {
     throw new ManifestCiError(`unsupported command: ${command ?? "<missing>"}`);

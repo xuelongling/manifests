@@ -240,6 +240,17 @@ async function writeOfflineProofFixture(root) {
     repository: { full_name: "xuelongling/manifests" },
     status: "completed",
   });
+  const candidateRun = path.join(root, "candidate-run.json");
+  const candidateRunId = "313131";
+  await writeJson(candidateRun, {
+    conclusion: "success",
+    event: "pull_request",
+    head_sha: manifestRevision,
+    id: Number(candidateRunId),
+    path: ".github/workflows/manifest-pr.yml",
+    repository: { full_name: "xuelongling/manifests" },
+    status: "completed",
+  });
   const writeSources = async (sourceRoot, names) => {
     const digests = {};
     for (const [field, fileName] of Object.entries(names)) {
@@ -371,7 +382,8 @@ async function writeOfflineProofFixture(root) {
     }
   }
   return {
-    candidate, candidateEvidence, candidateId, controllerRun, controllerRunId, proofEvidence, verifiedVerdict,
+    candidate, candidateEvidence, candidateId, candidateRun, candidateRunId, controllerRun, controllerRunId,
+    proofEvidence, verifiedVerdict,
   };
 }
 
@@ -381,6 +393,8 @@ function offlineProofArguments(fixture, output) {
     "--candidate-evidence", fixture.candidateEvidence,
     "--verified-verdict", fixture.verifiedVerdict,
     "--candidate-id", fixture.candidateId,
+    "--candidate-run", fixture.candidateRun,
+    "--candidate-run-id", fixture.candidateRunId,
     "--controller-run", fixture.controllerRun,
     "--controller-run-id", fixture.controllerRunId,
     "--proof-evidence", fixture.proofEvidence,
@@ -1005,6 +1019,23 @@ test("offline proof rejects a controller run outside the trusted main workflow",
     const result = invoke(offlineProofArguments(fixture, output));
     assert.equal(result.status, 1);
     assert.match(result.stderr, /trusted Tier 1 VM controller workflow/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects candidate evidence from outside the Manifest PR workflow", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-provenance-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const candidateRun = JSON.parse(await readFile(fixture.candidateRun, "utf8"));
+    candidateRun.path = ".github/workflows/untrusted.yml";
+    await writeJson(fixture.candidateRun, candidateRun);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /trusted Manifest PR workflow/i);
     await assert.rejects(readFile(output));
   } finally {
     await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

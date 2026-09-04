@@ -29,9 +29,12 @@ test("Tier 1 Offline Proof consumes trusted candidate and controller evidence fa
   assert.doesNotMatch(source, /proof_artifact/);
   assert.match(source, /run-id: \$\{\{ inputs\.proof_run_id \}\}/);
   assert.match(source, /api\.github\.com\/repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$TSFG_PROOF_RUN_ID/);
+  assert.match(source, /api\.github\.com\/repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$TSFG_CANDIDATE_RUN_ID/);
   assert.match(source, /Authorization: Bearer \$GH_TOKEN/);
   assert.match(source, /--controller-run \.ci\/controller-run\.json/);
   assert.match(source, /--controller-run-id "\$TSFG_PROOF_RUN_ID"/);
+  assert.match(source, /--candidate-run \.ci\/candidate-run\.json/);
+  assert.match(source, /--candidate-run-id "\$TSFG_CANDIDATE_RUN_ID"/);
   assert.doesNotMatch(source, /run:[\s\S]*actions\/runs\/\$\{\{/);
   assert.match(source, /node tools\/manifest-ci\.mjs offline-proof/);
   assert.match(source, /--candidate-evidence \.ci\/candidate-evidence/);
@@ -55,6 +58,8 @@ test("trusted controller workflow delegates only to the protected out-of-band VM
   assert.match(source, /--candidate-evidence \.ci\/candidate-evidence/);
   assert.match(source, /--verified-verdict \.ci\/verified-verdict\/manifest-verdict\.json/);
   assert.match(source, /--out \.ci\/proof-evidence/);
+  assert.match(source, /manifest-ci\.mjs candidate-proof-input/);
+  assert.match(source, /--candidate-run \.ci\/candidate-run\.json/);
   assert.match(source, /name: tier1-vm-controller-\$\{\{ inputs\.candidate_id \}\}/);
   for (const reference of [...source.matchAll(/^\s*- uses:\s*([^\s#]+)/gm)].map((match) => match[1])) {
     assert.match(reference, /^[^@\s]+@[0-9a-f]{40}$/);

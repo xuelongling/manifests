@@ -268,10 +268,12 @@ first run from `.github/workflows/tier1-vm-controller.yml` on protected
 
 Only the closed JSON report schema is accepted; extra files or fields are
 rejected so controller logs, environment dumps, and credentials cannot be
-silently archived as proof. The consumer fetches the controller run directly
-from the GitHub Actions API and requires a successful `workflow_dispatch` of
-the trusted workflow from protected `main`; a caller-selected run from any
-other workflow or branch fails. Dispatch the workflow with the prior Candidate
+silently archived as proof. The consumer fetches both the Candidate and
+controller runs directly from the GitHub Actions API. Candidate evidence must
+come from the successful Manifest PR workflow at the exact manifest commit;
+controller evidence must come from a successful `workflow_dispatch` of the
+trusted workflow from protected `main`. A caller-selected run from any other
+workflow or branch fails. Dispatch the workflow with the prior Candidate
 run ID, its complete 64-hex candidate ID, and the trusted controller run ID;
 the proof artifact name is derived from that candidate ID rather than supplied
 by the caller. Equivalently, validate already-downloaded artifacts and an
@@ -282,6 +284,8 @@ node tools/manifest-ci.mjs offline-proof `
     --candidate-evidence .ci/candidate-evidence `
     --verified-verdict .ci/verified-verdict/manifest-verdict.json `
     --candidate-id <complete-resolved-manifest-content-address> `
+    --candidate-run .ci/candidate-run.json `
+    --candidate-run-id <manifest-pr-run-id> `
     --controller-run .ci/controller-run.json `
     --controller-run-id <trusted-controller-run-id> `
     --proof-evidence .ci/proof-evidence `
