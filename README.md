@@ -229,3 +229,56 @@ compatibility, build, package, attestation, and reproducibility reports all
 bind to that exact resolved candidate. `manifest-ci.mjs tag-policy` compares
 trusted tag ref maps and rejects release tag movement or deletion fixtures;
 repository ruleset protection remains a separate required control.
+
+## Minimum Tier 1 Offline Proof
+
+Hosted pull-request runners establish `Verified Candidate`; they do not prove
+the minimum supported operating systems. Each Linux candidate producer runs a
+TCP canary against `1.1.1.1:443` and `8.8.8.8:443` inside its loopback-only
+network namespace before build and after package. Both observations, the exact
+Candidate Integration, Build Identity, and Toolchain Closure are recorded under
+`hosted-offline/` in the ordinary 90-day candidate evidence artifact. The raw
+before/after canary reports are retained beside each hosted report, and the
+validator recomputes their digests and the producing package-report digest.
+Every report binds the Manifest Repository URL, selected manifest name and
+revision, Candidate Overlay digest, resolved-manifest digest, and product and
+Agent OIDs.
+
+The `Tier 1 Offline Proof` workflow is a fail-closed evidence consumer. It does
+not claim to provision unavailable infrastructure. A trusted VM controller must
+first publish a proof artifact containing:
+
+- Debian 12.15, glibc 2.36, 6.1-series kernel runtime smoke for the exact
+  `release` profile;
+- two different Windows 11 24H2 guests, each with distinct workspace, cache,
+  and build-output roots;
+- independently executed Workspace Verification, build, test, package, and
+  package runtime smoke in both Windows guests for the exact `release` profile;
+- a completely reverified `windows-x86_64-msvc/sha256/<closure>` cache injected
+  before isolation;
+- out-of-band controller attestations that the hypervisor disconnected every
+  external guest adapter, plus blocked pre/post canaries and per-command WFP
+  process isolation;
+- complete SHA-256 references to the OS, isolation, cache verification, command,
+  package, and runtime source reports. Because controller-private raw logs are
+  deliberately not archived, the controller attests the canonical digest of
+  this closed source-reference set; the validator recomputes that set digest
+  and checks each reference against its corresponding report field.
+
+Only the closed JSON report schema is accepted; extra files or fields are
+rejected so controller logs, environment dumps, and credentials cannot be
+silently archived as proof. Dispatch the workflow with the prior Candidate run
+ID, its complete 64-hex candidate ID, the trusted controller run ID, and exact
+proof artifact name. Equivalently, validate already-downloaded artifacts with:
+
+```powershell
+node tools/manifest-ci.mjs offline-proof `
+    --candidate-evidence .ci/candidate-evidence `
+    --verified-verdict .ci/verified-verdict/manifest-verdict.json `
+    --candidate-id <complete-resolved-manifest-content-address> `
+    --proof-evidence .ci/proof-evidence `
+    --out .ci/offline-proof.json
+```
+
+The result is an `Offline Proof` prerequisite only. It does not declare the
+Candidate Promotable or Stable; Owner-gated promotion remains a separate step.

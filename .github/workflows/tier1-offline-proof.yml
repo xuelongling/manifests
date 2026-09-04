@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: MIT
+
+name: Tier 1 Offline Proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        required: true
+        type: string
+        description: Workflow run containing the Verified Candidate evidence and verdict
+      candidate_id:
+        required: true
+        type: string
+        description: Complete resolved-manifest content address to prove
+      proof_run_id:
+        required: true
+        type: string
+        description: Trusted controller run containing real minimum-VM evidence
+      proof_artifact:
+        required: true
+        type: string
+        description: Exact artifact published by the trusted out-of-band VM controller
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  validate-offline-proof:
+    name: Validate Tier 1 Offline Proof
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.20.0
+      - name: Download the immutable Verified Candidate evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: .ci/candidate-evidence
+          pattern: manifest-candidate-evidence-*
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download the Verified Candidate verdict
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: .ci/verified-verdict
+          pattern: manifest-verdict-*
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Download evidence from the trusted out-of-band VM controller
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          name: ${{ inputs.proof_artifact }}
+          path: .ci/proof-evidence
+          run-id: ${{ inputs.proof_run_id }}
+      - name: Fail closed unless every minimum Tier 1 proof is candidate-bound
+        env:
+          TSFG_CANDIDATE_ID: ${{ inputs.candidate_id }}
+        shell: bash
+        run: >-
+          node tools/manifest-ci.mjs offline-proof
+          --candidate-evidence .ci/candidate-evidence
+          --verified-verdict .ci/verified-verdict/manifest-verdict.json
+          --candidate-id "$TSFG_CANDIDATE_ID"
+          --proof-evidence .ci/proof-evidence
+          --out .ci/offline-proof.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          if-no-files-found: error
+          name: tier1-offline-proof-${{ inputs.candidate_id }}
+          path: .ci/offline-proof.json
+          retention-days: 90

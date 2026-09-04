@@ -188,6 +188,28 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   assert.match(job(source, "reproducibility"), /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
 });
 
+test("Linux candidate builds publish candidate-bound canaries from before and after the offline chain", async () => {
+  const source = await workflow();
+  const build = job(source, "product-build");
+  const before = build.indexOf('network-canary.mjs" --out "$canary_root/before.json"');
+  const buildCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" build');
+  const packageCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" package');
+  const after = build.indexOf('network-canary.mjs" --out "$canary_root/after.json"');
+  assert.ok(before >= 0 && before < buildCommand, "the first real canary must run before build");
+  assert.ok(after > packageCommand, "the second real canary must run after package");
+  assert.match(build, /offline "\$\(command -v node\)" "\$GITHUB_WORKSPACE\/tools\/network-canary\.mjs"/);
+  assert.match(build, /hosted-offline\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.profile \}\}\/\$\{\{ matrix\.producer \}\}/);
+  assert.match(build, /join\(process\.env\.TSFG_HOSTED_ROOT,'report\.json'\)/);
+  assert.match(build, /resolvedManifestDigest:'sha256:'\+process\.env\.TSFG_CANDIDATE_ID/);
+  assert.match(build, /package-report\.json/);
+  assert.match(build, /toolchainClosureDigest:packageReport\.result\.buildIdentity\.toolchainClosureDigest/);
+  assert.match(build, /candidateOverlayDigest:process\.env\.TSFG_CANDIDATE_OVERLAY_DIGEST/);
+  assert.match(build, /manifestRepository:process\.env\.TSFG_MANIFEST_REPOSITORY/);
+  assert.match(build, /canaryAfterSha256:sha256\(afterBytes\)/);
+  assert.match(build, /canaryBeforeSha256:sha256\(beforeBytes\)/);
+  assert.match(build, /packageReportSha256:sha256\(packageBytes\)/);
+});
+
 test("candidate evidence archives every manifest identity and resolved product proof for 90 days", async () => {
   const source = await workflow();
   const gate = job(source, "repository-gate");

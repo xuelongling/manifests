@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -101,6 +101,251 @@ function workspaceReport(candidate, resolved) {
   };
 }
 
+async function treeDigest(root) {
+  async function files(directory, relative = "") {
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    const paths = [];
+    for (const entry of entries) {
+      const child = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) paths.push(...await files(path.join(directory, entry.name), child));
+      else paths.push(child);
+    }
+    return paths;
+  }
+  const entries = await Promise.all((await files(root)).map(async (relativePath) => ({
+    path: relativePath,
+    sha256: byteDigest(await readFile(path.join(root, ...relativePath.split("/")))),
+  })));
+  return digest({ entries, schemaVersion: "1" });
+}
+
+async function writeOfflineProofFixture(root) {
+  const candidateEvidence = path.join(root, "candidate-evidence");
+  const proofEvidence = path.join(root, "proof-evidence");
+  const candidateId = "c".repeat(64);
+  const productRevision = "3".repeat(40);
+  const agentRevision = "2".repeat(40);
+  const manifestRevision = "4".repeat(40);
+  const candidateOverlay = {
+    baseline: {
+      manifest: "snapshots/tsfg-v0.1.0.xml",
+      repository: "https://github.com/xuelongling/manifests.git",
+      revision: manifestRevision,
+    },
+    replacements: [{ project: "tsfg.git", revision: productRevision }],
+    schemaVersion: "1",
+  };
+  const candidate = {
+    agentRevision,
+    candidateOverlayDigest: digest(candidateOverlay),
+    id: candidateId,
+    manifest: "snapshots/tsfg-v0.1.0.xml",
+    manifestRepository: "https://github.com/xuelongling/manifests.git",
+    manifestRevision,
+    productRevision,
+    resolvedManifestDigest: `sha256:${candidateId}`,
+  };
+  await writeJson(path.join(candidateEvidence, "manifest-plan.json"), {
+    candidates: [{
+      agentRevision, baselineProductRevision: "1".repeat(40), candidateOverlayDigest: candidate.candidateOverlayDigest,
+      id: candidateId, manifest: candidate.manifest, manifestRepository: candidate.manifestRepository,
+      manifestRevision, productRevision,
+    }],
+    evidenceRetentionDays: "90",
+    schemaVersion: "1",
+  });
+  await writeJson(path.join(candidateEvidence, "candidates", candidateId, "candidate-overlay.json"), candidateOverlay);
+  await writeJson(path.join(candidateEvidence, "candidates", candidateId, "candidate-summary.json"), {
+    overlayDigest: candidate.candidateOverlayDigest,
+    resolvedManifestDigest: candidate.resolvedManifestDigest,
+    resolvedManifestXmlSha256: byteDigest("resolved manifest XML"),
+    schemaVersion: "1",
+  });
+  const canaries = {
+    after: ["1.1.1.1:443", "8.8.8.8:443"].map((endpoint) => ({ endpoint, status: "blocked" })),
+    before: ["1.1.1.1:443", "8.8.8.8:443"].map((endpoint) => ({ endpoint, status: "blocked" })),
+  };
+  const buildIdentities = new Map();
+  const archives = new Map();
+  for (const target of ["linux-x86_64-gnu", "windows-x86_64-msvc"]) {
+    for (const profile of ["debug", "release"]) {
+      const buildIdentityDigest = byteDigest(`${target}/${profile}/identity`);
+      const toolchainClosureDigest = byteDigest(`${target}/closure`);
+      const archiveBytes = Buffer.from(`${target}/${profile}/archive\n`);
+      const archiveSha256 = byteDigest(archiveBytes);
+      buildIdentities.set(`${target}/${profile}`, { buildIdentityDigest, toolchainClosureDigest });
+      archives.set(`${target}/${profile}`, archiveSha256);
+      for (const producer of ["a", "b"]) {
+        const producerRoot = path.join(candidateEvidence, "producers", candidateId, target, profile, producer);
+        const archive = `tsfg-${target}-${profile}.archive`;
+        const packageReport = {
+          command: "package",
+          result: {
+            archive,
+            buildIdentity: { digest: buildIdentityDigest, profile, target, toolchainClosureDigest },
+          },
+          schemaVersion: "1",
+          status: "success",
+        };
+        const packageReportBytes = `${JSON.stringify(packageReport)}\n`;
+        await writeJson(path.join(producerRoot, "package-report.json"), packageReport);
+        await mkdir(path.join(producerRoot, "package"), { recursive: true });
+        await writeFile(path.join(producerRoot, "package", archive), archiveBytes);
+        if (target === "linux-x86_64-gnu") {
+          const hostedRoot = path.join(candidateEvidence, "hosted-offline", candidateId, profile, producer);
+          const beforeBytes = `${JSON.stringify({ canaries: canaries.before, schemaVersion: "1", status: "success" })}\n`;
+          const afterBytes = `${JSON.stringify({ canaries: canaries.after, schemaVersion: "1", status: "success" })}\n`;
+          await mkdir(hostedRoot, { recursive: true });
+          await writeFile(path.join(hostedRoot, "canary-before.json"), beforeBytes);
+          await writeFile(path.join(hostedRoot, "canary-after.json"), afterBytes);
+          await writeJson(path.join(hostedRoot, "report.json"), {
+            buildIdentityDigest,
+            candidate,
+            canaries,
+            isolation: { boundary: "linux-network-namespace", loopbackOnly: true, status: "isolated" },
+            producer,
+            profile,
+            schemaVersion: "1",
+            sources: {
+              canaryAfterSha256: byteDigest(afterBytes),
+              canaryBeforeSha256: byteDigest(beforeBytes),
+              packageReportSha256: byteDigest(packageReportBytes),
+            },
+            status: "success",
+            target,
+            toolchainClosureDigest,
+          });
+        }
+      }
+    }
+  }
+  const verifiedVerdict = path.join(root, "verified-verdict.json");
+  await writeJson(verifiedVerdict, {
+    candidateIds: [candidateId],
+    evidenceDigest: await treeDigest(candidateEvidence),
+    evidenceRetentionDays: "90",
+    promotionState: "Verified Candidate",
+    schemaVersion: "1",
+  });
+  for (const profile of ["release"]) {
+    const identity = buildIdentities.get(`linux-x86_64-gnu/${profile}`);
+    const linuxSources = {
+      isolationAttestationSha256: byteDigest("linux/isolation-attestation"),
+      osAttestationSha256: byteDigest("linux/os-attestation"),
+      packageReportSha256: byteDigest("linux/package-report"),
+      runtimeReportSha256: byteDigest("linux/runtime-report"),
+    };
+    await writeJson(path.join(proofEvidence, "linux-minimum", candidateId, profile, "report.json"), {
+      archiveSha256: archives.get(`linux-x86_64-gnu/${profile}`),
+      buildIdentityDigest: identity.buildIdentityDigest,
+      candidate,
+      canaries,
+      controller: {
+        attestationSha256: byteDigest("linux/controller-attestation"),
+        executionChannel: "out-of-band",
+        sourceReportsDigest: digest(linuxSources),
+        status: "attested",
+      },
+      environment: {
+        architecture: "x86_64",
+        attestationSha256: byteDigest("linux/os-attestation"),
+        distribution: "Debian GNU/Linux",
+        distributionVersion: "12.15",
+        glibcVersion: "2.36",
+        kernelRelease: "6.1.0-39-amd64",
+      },
+      isolation: { boundary: "linux-network-namespace", loopbackOnly: true, status: "isolated" },
+      profile,
+      runtimeSmoke: { cpp: "passed", reportSha256: byteDigest("linux/runtime-report"), status: "passed", zig: "passed" },
+      schemaVersion: "1",
+      sources: linuxSources,
+      status: "success",
+      target: "linux-x86_64-gnu",
+      toolchainClosureDigest: identity.toolchainClosureDigest,
+    });
+    for (const vm of ["a", "b"]) {
+      const windowsIdentity = buildIdentities.get(`windows-x86_64-msvc/${profile}`);
+      const windowsSources = {
+        buildReportSha256: byteDigest(`${vm}/${profile}/build-report`),
+        cacheVerificationReportSha256: byteDigest(`${vm}/${profile}/cache-verification-report`),
+        environmentAttestationSha256: byteDigest(`${vm}/os-attestation`),
+        packageReportSha256: byteDigest(`${vm}/${profile}/package-report`),
+        runtimeReportSha256: byteDigest(`${vm}/${profile}/runtime-report`),
+        testReportSha256: byteDigest(`${vm}/${profile}/test-report`),
+        virtualNetworkAttestationSha256: byteDigest(`${vm}/virtual-network-attestation`),
+        workspaceReportSha256: byteDigest(`${vm}/${profile}/workspace-report`),
+      };
+      await writeJson(path.join(proofEvidence, "windows", candidateId, vm, profile, "report.json"), {
+        archiveSha256: archives.get(`windows-x86_64-msvc/${profile}`),
+        buildIdentityDigest: windowsIdentity.buildIdentityDigest,
+        buildOutputPathDigest: byteDigest(`${vm}/${profile}/build-output`),
+        cache: {
+          addressing: "sha256",
+          cacheKey: `windows-x86_64-msvc/sha256/${windowsIdentity.toolchainClosureDigest.slice("sha256:".length)}`,
+          injectedArtifactSha256: byteDigest("windows-cache"),
+          objectVerification: "complete",
+          pathDigest: byteDigest(`${vm}/cache-root`),
+          toolchainClosureDigest: windowsIdentity.toolchainClosureDigest,
+          unexpectedObjects: "rejected",
+          verificationReportSha256: windowsSources.cacheVerificationReportSha256,
+        },
+        candidate,
+        canaries,
+        controller: {
+          attestationSha256: byteDigest(`${vm}/controller-attestation`),
+          executionChannel: "out-of-band",
+          networkAuthority: "host-hypervisor",
+          sourceReportsDigest: digest(windowsSources),
+          status: "attested",
+        },
+        commands: {
+          build: {
+            buildExecuted: true, buildIdentityDigest: windowsIdentity.buildIdentityDigest,
+            processIsolation: "blocked", reportSha256: windowsSources.buildReportSha256, status: "passed",
+          },
+          package: {
+            buildIdentityDigest: windowsIdentity.buildIdentityDigest, processIsolation: "blocked",
+            reportSha256: windowsSources.packageReportSha256, source: "local-build", status: "passed",
+          },
+          runtimeSmoke: {
+            cpp: "passed", processIsolation: "blocked", reportSha256: windowsSources.runtimeReportSha256,
+            source: "local-package", status: "passed", zig: "passed",
+          },
+          test: {
+            buildIdentityDigest: windowsIdentity.buildIdentityDigest, processIsolation: "blocked",
+            reportSha256: windowsSources.testReportSha256, status: "passed",
+          },
+          workspaceVerification: {
+            processIsolation: "blocked", reportSha256: windowsSources.workspaceReportSha256, status: "passed",
+          },
+        },
+        environment: {
+          architecture: "AMD64", attestationSha256: windowsSources.environmentAttestationSha256, buildNumber: "26100",
+          displayVersion: "24H2", product: "Windows 11",
+        },
+        processIsolation: { mode: "wfp-dynamic-app-id", scope: "locked-process-set", status: "blocked" },
+        profile,
+        schemaVersion: "1",
+        sources: windowsSources,
+        status: "success",
+        target: "windows-x86_64-msvc",
+        toolchainClosureDigest: windowsIdentity.toolchainClosureDigest,
+        virtualNetwork: {
+          attestationSha256: windowsSources.virtualNetworkAttestationSha256,
+          configuredBy: "hypervisor",
+          externalAdapters: "disconnected",
+          status: "disconnected",
+        },
+        vm,
+        vmIdentityDigest: byteDigest(`${vm}/vm-identity`),
+        workspacePathDigest: byteDigest(`${vm}/workspace-root`),
+      });
+    }
+  }
+  return { candidate, candidateEvidence, candidateId, proofEvidence, verifiedVerdict };
+}
+
 test("candidate overlay replaces one baseline project by complete OID and publishes canonical evidence", async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-candidate-"));
   const output = path.join(sandbox, "candidate");
@@ -165,6 +410,8 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
     ], sandbox);
     assert.equal(result.status, 0, result.stderr);
     const plan = JSON.parse(await readFile(path.join(output, "manifest-plan.json"), "utf8"));
+    const candidateRoot = path.join(output, "candidates", plan.candidates[0].id);
+    const overlay = JSON.parse(await readFile(path.join(candidateRoot, "candidate-overlay.json"), "utf8"));
     assert.equal(plan.schemaVersion, "1");
     assert.equal(plan.evidenceRetentionDays, "90");
     assert.equal(plan.candidates.length, 1);
@@ -172,15 +419,15 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
       agentChanged: false,
       agentRevision: baseAgent,
       baselineProductRevision: baseProduct,
+      candidateOverlayDigest: digest(overlay),
       id: plan.candidates[0].id,
       manifest: "snapshots/tsfg-v0.1.0.xml",
+      manifestRepository: "https://github.com/xuelongling/manifests.git",
       manifestRevision: head,
       productChanged: true,
       productRevision: nextProduct,
     });
     assert.match(plan.candidates[0].id, /^[0-9a-f]{64}$/);
-    const candidateRoot = path.join(output, "candidates", plan.candidates[0].id);
-    const overlay = JSON.parse(await readFile(path.join(candidateRoot, "candidate-overlay.json"), "utf8"));
     assert.deepEqual(overlay.replacements, [{ project: "tsfg.git", revision: nextProduct }]);
     assert.equal(
       JSON.parse(await readFile(path.join(candidateRoot, "resolved-manifest.json"), "utf8")).projects.length,
@@ -669,6 +916,205 @@ test("candidate Stable baseline must be the repository's current default identit
     ], sandbox);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /current Stable/i);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof binds minimum Tier 1 VM evidence to one Verified Candidate", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(await readFile(output, "utf8"));
+    assert.deepEqual(report.candidateIds, [fixture.candidateId]);
+    assert.deepEqual(report.candidate, fixture.candidate);
+    assert.deepEqual(report.builds.map(({ profile, target }) => ({ profile, target })), [
+      { profile: "release", target: "linux-x86_64-gnu" },
+      { profile: "release", target: "windows-x86_64-msvc" },
+    ]);
+    for (const build of report.builds) {
+      assert.match(build.buildIdentityDigest, /^sha256:[0-9a-f]{64}$/);
+      assert.match(build.toolchainClosureDigest, /^sha256:[0-9a-f]{64}$/);
+    }
+    assert.equal(report.proof, "Offline Proof");
+    assert.equal(report.status, "success");
+    assert.equal(report.requiredEvidence.hostedLinux, "2/2");
+    assert.equal(report.requiredEvidence.linuxMinimumRuntime, "1/1");
+    assert.equal(report.requiredEvidence.windowsIndependentVms, "2/2");
+    assert.equal(report.requiredEvidence.windowsReplays, "2/2");
+    assert.match(report.evidenceDigest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(report.promotionState, undefined);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects undeclared evidence fields instead of archiving ambient VM state", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-schema-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const windowsReportPath = path.join(
+      fixture.proofEvidence, "windows", fixture.candidateId, "a", "release", "report.json",
+    );
+    const windowsReport = JSON.parse(await readFile(windowsReportPath, "utf8"));
+    windowsReport.ambientEnvironment = { runnerLog: "must not be archived" };
+    await writeJson(windowsReportPath, windowsReport);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /undeclared evidence field/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects a raw report that drifts from its Candidate Overlay identity", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-binding-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const linuxReportPath = path.join(
+      fixture.proofEvidence, "linux-minimum", fixture.candidateId, "release", "report.json",
+    );
+    const linuxReport = JSON.parse(await readFile(linuxReportPath, "utf8"));
+    linuxReport.candidate.candidateOverlayDigest = byteDigest("different Candidate Overlay");
+    await writeJson(linuxReportPath, linuxReport);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /exact Candidate Integration/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof recomputes hosted canary source digests", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-canary-tamper-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const canaryPath = path.join(
+      fixture.candidateEvidence, "hosted-offline", fixture.candidateId, "release", "a", "canary-before.json",
+    );
+    const canary = JSON.parse(await readFile(canaryPath, "utf8"));
+    canary.canaries[0].status = "connected";
+    await writeJson(canaryPath, canary);
+    const verdict = JSON.parse(await readFile(fixture.verifiedVerdict, "utf8"));
+    verdict.evidenceDigest = await treeDigest(fixture.candidateEvidence);
+    await writeJson(fixture.verifiedVerdict, verdict);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /canary source is not bound/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects controller-attested source digests that drift from a VM command report", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-controller-sources-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const windowsReportPath = path.join(
+      fixture.proofEvidence, "windows", fixture.candidateId, "a", "release", "report.json",
+    );
+    const report = JSON.parse(await readFile(windowsReportPath, "utf8"));
+    report.sources.buildReportSha256 = byteDigest("different build report");
+    report.controller.sourceReportsDigest = digest(report.sources);
+    await writeJson(windowsReportPath, report);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /source digests do not bind/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects Windows lanes that reuse another VM build output", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-reused-output-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const firstPath = path.join(fixture.proofEvidence, "windows", fixture.candidateId, "a", "release", "report.json");
+    const secondPath = path.join(fixture.proofEvidence, "windows", fixture.candidateId, "b", "release", "report.json");
+    const first = JSON.parse(await readFile(firstPath, "utf8"));
+    const second = JSON.parse(await readFile(secondPath, "utf8"));
+    second.buildOutputPathDigest = first.buildOutputPathDigest;
+    await writeJson(secondPath, second);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /independent Windows VM build output/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects undeclared files in the controller evidence artifact", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-extra-file-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    await writeFile(path.join(fixture.proofEvidence, "controller.log"), "must not be archived\n");
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke([
+      "offline-proof",
+      "--candidate-evidence", fixture.candidateEvidence,
+      "--verified-verdict", fixture.verifiedVerdict,
+      "--candidate-id", fixture.candidateId,
+      "--proof-evidence", fixture.proofEvidence,
+      "--out", output,
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /undeclared proof evidence file/i);
+    await assert.rejects(readFile(output));
   } finally {
     await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

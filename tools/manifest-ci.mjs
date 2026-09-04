@@ -197,6 +197,19 @@ function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value)}\n`);
 }
 
+async function renameWithRetry(source, destination) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const retryable = error?.code === "EACCES" || error?.code === "EBUSY" || error?.code === "EPERM";
+      if (!retryable || attempt === 9) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+}
+
 async function publishDirectory(destination, files) {
   const parent = path.dirname(destination);
   await mkdir(parent, { recursive: true });
@@ -208,7 +221,7 @@ async function publishDirectory(destination, files) {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, bytes, { flag: "wx" });
     }
-    await rename(staging, destination);
+    await renameWithRetry(staging, destination);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
@@ -303,8 +316,10 @@ function resolvedIdentity(baseline, baselineProjects, manifestXml, manifestName,
       agentChanged: replacements.some((entry) => entry.project === ".agents.git"),
       agentRevision: projects.find((entry) => entry.name === ".agents.git").revision,
       baselineProductRevision: baselineProjects.find((entry) => entry.name === "tsfg.git").revision,
+      candidateOverlayDigest: summary.overlayDigest,
       id: summary.resolvedManifestDigest.slice("sha256:".length),
       manifest: manifestName,
+      manifestRepository: baseline.repository,
       manifestRevision,
       productChanged: replacements.some((entry) => entry.project === "tsfg.git"),
       productRevision: projects.find((entry) => entry.name === "tsfg.git").revision,
@@ -394,7 +409,7 @@ async function atomicWrite(destination, bytes) {
   await mkdir(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.${randomUUID()}.tmp`;
   await writeFile(temporary, bytes, { flag: "wx" });
-  await rename(temporary, destination);
+  await renameWithRetry(temporary, destination);
 }
 
 async function tagPolicy(options) {
@@ -490,6 +505,434 @@ async function evidenceFiles(root, current = "") {
     else throw new ManifestCiError(`evidence entry must be a regular file: ${relative}`);
   }
   return files;
+}
+
+function requireDigest(value, label) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(value)) throw new ManifestCiError(`${label} must be a complete SHA-256 digest`);
+  return value;
+}
+
+function requireFields(value, fields, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ManifestCiError(`${label} must be a structured evidence object`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (canonicalize(actual) !== canonicalize(expected)) {
+    throw new ManifestCiError(`${label} contains a missing or undeclared evidence field`);
+  }
+}
+
+function candidateReference(candidatePlan, overlay, summary) {
+  requireFields(overlay, ["baseline", "replacements", "schemaVersion"], "Candidate Overlay");
+  requireFields(overlay.baseline, ["manifest", "repository", "revision"], "Candidate Overlay baseline");
+  requireFields(summary, [
+    "overlayDigest", "resolvedManifestDigest", "resolvedManifestXmlSha256", "schemaVersion",
+  ], "candidate summary");
+  if (
+    overlay.schemaVersion !== "1" || summary.schemaVersion !== "1" ||
+    overlay.baseline.repository !== manifestRepositoryUrl ||
+    summary.overlayDigest !== digest(overlay) ||
+    summary.resolvedManifestDigest !== `sha256:${candidatePlan.id}` ||
+    candidatePlan.candidateOverlayDigest !== summary.overlayDigest ||
+    candidatePlan.manifestRepository !== overlay.baseline.repository
+  ) throw new ManifestCiError("candidate summary does not bind the exact Candidate Overlay and resolved manifest");
+  return {
+    agentRevision: candidatePlan.agentRevision,
+    candidateOverlayDigest: summary.overlayDigest,
+    id: candidatePlan.id,
+    manifest: candidatePlan.manifest,
+    manifestRepository: overlay.baseline.repository,
+    manifestRevision: candidatePlan.manifestRevision,
+    productRevision: candidatePlan.productRevision,
+    resolvedManifestDigest: `sha256:${candidatePlan.id}`,
+  };
+}
+
+function requireCandidateReference(actual, expected, label) {
+  requireFields(actual, [
+    "agentRevision", "candidateOverlayDigest", "id", "manifest", "manifestRepository", "manifestRevision",
+    "productRevision", "resolvedManifestDigest",
+  ], `${label} candidate`);
+  if (canonicalize(actual) !== canonicalize(expected)) {
+    throw new ManifestCiError(`${label} is not bound to the exact Candidate Integration`);
+  }
+}
+
+function requireCanaries(canaries, label) {
+  requireFields(canaries, ["after", "before"], `${label} canaries`);
+  const expected = ["1.1.1.1:443", "8.8.8.8:443"];
+  for (const phase of ["before", "after"]) {
+    for (const entry of canaries?.[phase] ?? []) {
+      requireFields(entry, ["endpoint", "status"], `${label} ${phase} canary`);
+    }
+    if (
+      !Array.isArray(canaries?.[phase]) || canaries[phase].length !== expected.length ||
+      expected.some((endpoint, index) =>
+        canaries[phase][index]?.endpoint !== endpoint || canaries[phase][index]?.status !== "blocked")
+    ) throw new ManifestCiError(`${label} does not prove blocked ${phase} network canaries`);
+  }
+}
+
+function requireLinuxIsolation(report, label) {
+  requireFields(report.isolation, ["boundary", "loopbackOnly", "status"], `${label} isolation`);
+  requireCanaries(report.canaries, label);
+  if (
+    report.isolation?.boundary !== "linux-network-namespace" ||
+    report.isolation?.loopbackOnly !== true ||
+    report.isolation?.status !== "isolated"
+  ) throw new ManifestCiError(`${label} does not prove loopback-only Linux network isolation`);
+}
+
+async function expectedCandidateBuild(candidateRoot, candidateId, target, profile) {
+  let expected;
+  let archiveSha256;
+  for (const producer of ["a", "b"]) {
+    const root = path.join(candidateRoot, "producers", candidateId, target, profile, producer);
+    const report = await readJson(path.join(root, "package-report.json"), `${target}/${profile}/${producer} hosted package`);
+    requireSuccess(report, `${target}/${profile}/${producer} hosted package`, "package");
+    const identity = report.result?.buildIdentity;
+    const archive = report.result?.archive;
+    if (
+      identity?.target !== target || identity?.profile !== profile ||
+      !/^sha256:[0-9a-f]{64}$/.test(identity?.digest) ||
+      !/^sha256:[0-9a-f]{64}$/.test(identity?.toolchainClosureDigest) ||
+      typeof archive !== "string" || archive === "" || archive.includes("/") || archive.includes("\\")
+    ) throw new ManifestCiError(`${target}/${profile}/${producer} hosted package identity is invalid`);
+    const actualArchiveSha256 = byteDigest(await readFile(path.join(root, "package", archive)));
+    const current = {
+      buildIdentityDigest: identity.digest,
+      toolchainClosureDigest: identity.toolchainClosureDigest,
+    };
+    if (expected && canonicalize(expected) !== canonicalize(current)) {
+      throw new ManifestCiError(`${target}/${profile} hosted producers disagree on Build Identity`);
+    }
+    if (archiveSha256 && archiveSha256 !== actualArchiveSha256) {
+      throw new ManifestCiError(`${target}/${profile} hosted producers disagree on package bytes`);
+    }
+    expected = current;
+    archiveSha256 = actualArchiveSha256;
+  }
+  return { ...expected, archiveSha256 };
+}
+
+function requireCommonProof(report, candidate, target, profile, expected, label) {
+  if (
+    report?.schemaVersion !== "1" || report.status !== "success" ||
+    report.target !== target || report.profile !== profile ||
+    report.buildIdentityDigest !== expected.buildIdentityDigest ||
+    report.toolchainClosureDigest !== expected.toolchainClosureDigest ||
+    report.archiveSha256 !== expected.archiveSha256
+  ) throw new ManifestCiError(`${label} does not match the verified Candidate Build Identity and package`);
+  requireCandidateReference(report.candidate, candidate, label);
+}
+
+async function offlineProof(options) {
+  const candidateRoot = path.resolve(required(options, "--candidate-evidence"));
+  const proofRoot = path.resolve(required(options, "--proof-evidence"));
+  const candidateId = required(options, "--candidate-id");
+  if (!/^[0-9a-f]{64}$/.test(candidateId)) throw new ManifestCiError("candidate id must be a complete content address");
+  const verdict = await readJson(path.resolve(required(options, "--verified-verdict")), "Verified Candidate verdict");
+  const candidateEvidenceEntries = await Promise.all((await evidenceFiles(candidateRoot)).map(async (relativePath) => ({
+    path: relativePath,
+    sha256: byteDigest(await readFile(path.join(candidateRoot, ...relativePath.split("/")))),
+  })));
+  const candidateEvidenceDigest = digest({ entries: candidateEvidenceEntries, schemaVersion: "1" });
+  if (
+    verdict?.schemaVersion !== "1" || verdict.promotionState !== "Verified Candidate" ||
+    verdict.evidenceDigest !== candidateEvidenceDigest || !Array.isArray(verdict.candidateIds) ||
+    !verdict.candidateIds.includes(candidateId)
+  ) throw new ManifestCiError("Offline Proof requires an unchanged Verified Candidate evidence bundle");
+  const plan = await readJson(path.join(candidateRoot, "manifest-plan.json"), "manifest plan");
+  const candidatePlan = plan?.candidates?.find((entry) => entry?.id === candidateId);
+  if (!candidatePlan) throw new ManifestCiError("candidate id is not present in the verified manifest plan");
+  for (const [value, label] of [
+    [candidatePlan.manifestRevision, "candidate manifest revision"],
+    [candidatePlan.productRevision, "candidate product revision"],
+    [candidatePlan.agentRevision, "candidate agent revision"],
+  ]) requireOid(value, label);
+  const candidateIdentityRoot = path.join(candidateRoot, "candidates", candidateId);
+  const overlay = await readJson(path.join(candidateIdentityRoot, "candidate-overlay.json"), "Candidate Overlay");
+  const summary = await readJson(path.join(candidateIdentityRoot, "candidate-summary.json"), "candidate summary");
+  const candidate = candidateReference(candidatePlan, overlay, summary);
+  const expectedProofFiles = [
+    ...["release"].map((profile) => `linux-minimum/${candidateId}/${profile}/report.json`),
+    ...["a", "b"].flatMap((vm) =>
+      ["release"].map((profile) => `windows/${candidateId}/${vm}/${profile}/report.json`)),
+  ];
+  const proofFiles = await evidenceFiles(proofRoot);
+  if (
+    proofFiles.length !== expectedProofFiles.length ||
+    proofFiles.some((relativePath) => !expectedProofFiles.includes(relativePath))
+  ) throw new ManifestCiError("controller artifact contains a missing or undeclared proof evidence file");
+  let hostedLinux = 0;
+  let linuxMinimumRuntime = 0;
+  let windowsReplays = 0;
+  const builds = [];
+  const vmEvidence = new Map();
+  const windowsBuildOutputs = new Set();
+  for (const profile of ["release"]) {
+    const linuxExpected = await expectedCandidateBuild(candidateRoot, candidateId, "linux-x86_64-gnu", profile);
+    builds.push({
+      buildIdentityDigest: linuxExpected.buildIdentityDigest,
+      profile,
+      target: "linux-x86_64-gnu",
+      toolchainClosureDigest: linuxExpected.toolchainClosureDigest,
+    });
+    for (const producer of ["a", "b"]) {
+      const label = `hosted Linux ${profile}/${producer}`;
+      const hostedRoot = path.join(candidateRoot, "hosted-offline", candidateId, profile, producer);
+      const report = await readJson(
+        path.join(hostedRoot, "report.json"),
+        label,
+      );
+      requireFields(report, [
+        "buildIdentityDigest", "candidate", "canaries", "isolation", "producer", "profile", "schemaVersion",
+        "sources", "status", "target", "toolchainClosureDigest",
+      ], label);
+      requireFields(report.sources, [
+        "canaryAfterSha256", "canaryBeforeSha256", "packageReportSha256",
+      ], `${label} sources`);
+      if (
+        report?.schemaVersion !== "1" || report.status !== "success" || report.target !== "linux-x86_64-gnu" ||
+        report.profile !== profile || report.producer !== producer ||
+        report.buildIdentityDigest !== linuxExpected.buildIdentityDigest ||
+        report.toolchainClosureDigest !== linuxExpected.toolchainClosureDigest
+      ) throw new ManifestCiError(`${label} is not bound to its hosted Candidate build`);
+      requireCandidateReference(report.candidate, candidate, label);
+      requireLinuxIsolation(report, label);
+      for (const phase of ["before", "after"]) {
+        const sourcePath = path.join(hostedRoot, `canary-${phase}.json`);
+        const source = await readJson(sourcePath, `${label} ${phase} canary source`);
+        requireFields(source, ["canaries", "schemaVersion", "status"], `${label} ${phase} canary source`);
+        if (
+          source.schemaVersion !== "1" || source.status !== "success" ||
+          canonicalize(source.canaries) !== canonicalize(report.canaries[phase]) ||
+          report.sources[`canary${phase[0].toUpperCase()}${phase.slice(1)}Sha256`] !== byteDigest(await readFile(sourcePath))
+        ) throw new ManifestCiError(`${label} ${phase} canary source is not bound to the hosted report`);
+      }
+      const packageReportPath = path.join(
+        candidateRoot, "producers", candidateId, "linux-x86_64-gnu", profile, producer, "package-report.json",
+      );
+      if (report.sources.packageReportSha256 !== byteDigest(await readFile(packageReportPath))) {
+        throw new ManifestCiError(`${label} package source is not bound to the hosted report`);
+      }
+      for (const [value, name] of [
+        [report.sources.canaryBeforeSha256, "before canary report"],
+        [report.sources.canaryAfterSha256, "after canary report"],
+        [report.sources.packageReportSha256, "package report"],
+      ]) requireDigest(value, `${label} ${name}`);
+      hostedLinux += 1;
+    }
+    const linuxLabel = `minimum Linux ${profile}`;
+    const linux = await readJson(
+      path.join(proofRoot, "linux-minimum", candidateId, profile, "report.json"),
+      linuxLabel,
+    );
+    requireFields(linux, [
+      "archiveSha256", "buildIdentityDigest", "candidate", "canaries", "controller", "environment", "isolation",
+      "profile", "runtimeSmoke", "schemaVersion", "sources", "status", "target", "toolchainClosureDigest",
+    ], linuxLabel);
+    requireFields(linux.controller, [
+      "attestationSha256", "executionChannel", "sourceReportsDigest", "status",
+    ], `${linuxLabel} controller`);
+    requireFields(linux.environment, [
+      "architecture", "attestationSha256", "distribution", "distributionVersion", "glibcVersion", "kernelRelease",
+    ], `${linuxLabel} environment`);
+    requireFields(linux.runtimeSmoke, ["cpp", "reportSha256", "status", "zig"], `${linuxLabel} runtime smoke`);
+    requireFields(linux.sources, [
+      "isolationAttestationSha256", "osAttestationSha256", "packageReportSha256", "runtimeReportSha256",
+    ], `${linuxLabel} sources`);
+    requireCommonProof(linux, candidate, "linux-x86_64-gnu", profile, linuxExpected, linuxLabel);
+    requireLinuxIsolation(linux, linuxLabel);
+    if (
+      linux.environment?.distribution !== "Debian GNU/Linux" ||
+      linux.environment?.distributionVersion !== "12.15" || linux.environment?.glibcVersion !== "2.36" ||
+      !/^6\.1(?:\.|-)/.test(linux.environment?.kernelRelease) || linux.environment?.architecture !== "x86_64" ||
+      linux.runtimeSmoke?.status !== "passed" ||
+      linux.runtimeSmoke?.cpp !== "passed" || linux.runtimeSmoke?.zig !== "passed" ||
+      linux.controller?.executionChannel !== "out-of-band" || linux.controller?.status !== "attested" ||
+      linux.controller?.sourceReportsDigest !== digest(linux.sources)
+    ) throw new ManifestCiError(`${linuxLabel} does not prove the exact minimum baseline runtime smoke`);
+    for (const [value, name] of [
+      [linux.environment.attestationSha256, "OS attestation"],
+      [linux.controller.attestationSha256, "controller attestation"],
+      [linux.controller.sourceReportsDigest, "controller source reports"],
+      [linux.runtimeSmoke.reportSha256, "runtime report"],
+      [linux.sources.isolationAttestationSha256, "isolation attestation"],
+      [linux.sources.osAttestationSha256, "source OS attestation"],
+      [linux.sources.packageReportSha256, "package report"],
+      [linux.sources.runtimeReportSha256, "source runtime report"],
+    ]) requireDigest(value, `${linuxLabel} ${name}`);
+    if (
+      linux.sources.osAttestationSha256 !== linux.environment.attestationSha256 ||
+      linux.sources.runtimeReportSha256 !== linux.runtimeSmoke.reportSha256
+    ) throw new ManifestCiError(`${linuxLabel} source digests do not bind its attestations and runtime report`);
+    linuxMinimumRuntime += 1;
+
+    const windowsExpected = await expectedCandidateBuild(candidateRoot, candidateId, "windows-x86_64-msvc", profile);
+    builds.push({
+      buildIdentityDigest: windowsExpected.buildIdentityDigest,
+      profile,
+      target: "windows-x86_64-msvc",
+      toolchainClosureDigest: windowsExpected.toolchainClosureDigest,
+    });
+    for (const vm of ["a", "b"]) {
+      const label = `Windows VM ${vm}/${profile}`;
+      const report = await readJson(path.join(proofRoot, "windows", candidateId, vm, profile, "report.json"), label);
+      requireFields(report, [
+        "archiveSha256", "buildIdentityDigest", "buildOutputPathDigest", "cache", "candidate", "canaries", "commands",
+        "controller", "environment", "processIsolation", "profile", "schemaVersion", "status", "target", "toolchainClosureDigest",
+        "sources", "virtualNetwork", "vm", "vmIdentityDigest", "workspacePathDigest",
+      ], label);
+      requireFields(report.environment, [
+        "architecture", "attestationSha256", "buildNumber", "displayVersion", "product",
+      ], `${label} environment`);
+      requireFields(report.virtualNetwork, [
+        "attestationSha256", "configuredBy", "externalAdapters", "status",
+      ], `${label} virtual network`);
+      requireFields(report.processIsolation, ["mode", "scope", "status"], `${label} process isolation`);
+      requireFields(report.controller, [
+        "attestationSha256", "executionChannel", "networkAuthority", "sourceReportsDigest", "status",
+      ], `${label} controller`);
+      requireFields(report.sources, [
+        "buildReportSha256", "cacheVerificationReportSha256", "environmentAttestationSha256",
+        "packageReportSha256", "runtimeReportSha256", "testReportSha256",
+        "virtualNetworkAttestationSha256", "workspaceReportSha256",
+      ], `${label} sources`);
+      requireFields(report.cache, [
+        "addressing", "cacheKey", "injectedArtifactSha256", "objectVerification", "pathDigest",
+        "toolchainClosureDigest", "unexpectedObjects", "verificationReportSha256",
+      ], `${label} cache`);
+      requireFields(report.commands, [
+        "build", "package", "runtimeSmoke", "test", "workspaceVerification",
+      ], `${label} commands`);
+      requireFields(report.commands.build, [
+        "buildExecuted", "buildIdentityDigest", "processIsolation", "reportSha256", "status",
+      ], `${label} build`);
+      requireFields(report.commands.package, [
+        "buildIdentityDigest", "processIsolation", "reportSha256", "source", "status",
+      ], `${label} package`);
+      requireFields(report.commands.runtimeSmoke, [
+        "cpp", "processIsolation", "reportSha256", "source", "status", "zig",
+      ], `${label} runtime smoke`);
+      requireFields(report.commands.test, [
+        "buildIdentityDigest", "processIsolation", "reportSha256", "status",
+      ], `${label} test`);
+      requireFields(report.commands.workspaceVerification, [
+        "processIsolation", "reportSha256", "status",
+      ], `${label} workspace verification`);
+      requireCommonProof(report, candidate, "windows-x86_64-msvc", profile, windowsExpected, label);
+      requireCanaries(report.canaries, label);
+      if (
+        report.vm !== vm || report.environment?.product !== "Windows 11" ||
+        report.environment?.displayVersion !== "24H2" || report.environment?.buildNumber !== "26100" ||
+        report.environment?.architecture !== "AMD64" ||
+        report.controller?.executionChannel !== "out-of-band" ||
+        report.controller?.networkAuthority !== "host-hypervisor" || report.controller?.status !== "attested" ||
+        report.controller?.sourceReportsDigest !== digest(report.sources) ||
+        report.virtualNetwork?.configuredBy !== "hypervisor" ||
+        report.virtualNetwork?.externalAdapters !== "disconnected" || report.virtualNetwork?.status !== "disconnected" ||
+        report.processIsolation?.mode !== "wfp-dynamic-app-id" ||
+        report.processIsolation?.scope !== "locked-process-set" || report.processIsolation?.status !== "blocked"
+      ) throw new ManifestCiError(`${label} does not prove Windows 11 24H2 virtual-network and process isolation`);
+      for (const [name, command] of Object.entries(report.commands ?? {})) {
+        if (command?.status !== "passed") throw new ManifestCiError(`${label} command ${name} did not pass`);
+      }
+      if (
+        report.commands?.workspaceVerification?.status !== "passed" ||
+        report.commands.workspaceVerification.processIsolation !== "blocked" ||
+        report.commands?.build?.status !== "passed" || report.commands.build.buildExecuted !== true ||
+        report.commands.build.processIsolation !== "blocked" ||
+        report.commands.build.buildIdentityDigest !== windowsExpected.buildIdentityDigest ||
+        report.commands?.test?.status !== "passed" || report.commands.test.processIsolation !== "blocked" ||
+        report.commands.test.buildIdentityDigest !== windowsExpected.buildIdentityDigest ||
+        report.commands?.package?.status !== "passed" || report.commands.package.source !== "local-build" ||
+        report.commands.package.processIsolation !== "blocked" ||
+        report.commands.package.buildIdentityDigest !== windowsExpected.buildIdentityDigest ||
+        report.commands?.runtimeSmoke?.status !== "passed" || report.commands.runtimeSmoke.source !== "local-package" ||
+        report.commands.runtimeSmoke.processIsolation !== "blocked" ||
+        report.commands.runtimeSmoke.cpp !== "passed" || report.commands.runtimeSmoke.zig !== "passed" ||
+        report.cache?.addressing !== "sha256" || report.cache?.objectVerification !== "complete" ||
+        report.cache?.toolchainClosureDigest !== windowsExpected.toolchainClosureDigest ||
+        report.cache?.cacheKey !== `windows-x86_64-msvc/sha256/${windowsExpected.toolchainClosureDigest.slice("sha256:".length)}` ||
+        report.cache?.unexpectedObjects !== "rejected"
+      ) throw new ManifestCiError(`${label} does not contain an independent complete cache-verified replay`);
+      if (
+        report.sources.buildReportSha256 !== report.commands.build.reportSha256 ||
+        report.sources.cacheVerificationReportSha256 !== report.cache.verificationReportSha256 ||
+        report.sources.environmentAttestationSha256 !== report.environment.attestationSha256 ||
+        report.sources.packageReportSha256 !== report.commands.package.reportSha256 ||
+        report.sources.runtimeReportSha256 !== report.commands.runtimeSmoke.reportSha256 ||
+        report.sources.testReportSha256 !== report.commands.test.reportSha256 ||
+        report.sources.virtualNetworkAttestationSha256 !== report.virtualNetwork.attestationSha256 ||
+        report.sources.workspaceReportSha256 !== report.commands.workspaceVerification.reportSha256
+      ) throw new ManifestCiError(`${label} source digests do not bind its command and environment reports`);
+      for (const [value, name] of [
+        [report.vmIdentityDigest, "VM identity"],
+        [report.workspacePathDigest, "workspace path"],
+        [report.buildOutputPathDigest, "build output path"],
+        [report.cache?.pathDigest, "cache path"],
+        [report.cache?.injectedArtifactSha256, "injected cache"],
+        [report.cache?.verificationReportSha256, "cache verification report"],
+        [report.controller?.attestationSha256, "controller attestation"],
+        [report.controller?.sourceReportsDigest, "controller source reports"],
+        [report.environment?.attestationSha256, "OS attestation"],
+        [report.virtualNetwork?.attestationSha256, "virtual network attestation"],
+        [report.commands?.workspaceVerification?.reportSha256, "workspace report"],
+        [report.commands?.build?.reportSha256, "build report"],
+        [report.commands?.test?.reportSha256, "test report"],
+        [report.commands?.package?.reportSha256, "package report"],
+        [report.commands?.runtimeSmoke?.reportSha256, "runtime report"],
+      ]) requireDigest(value, `${label} ${name}`);
+      if (windowsBuildOutputs.has(report.buildOutputPathDigest)) {
+        throw new ManifestCiError(`${label} does not use an independent Windows VM build output`);
+      }
+      windowsBuildOutputs.add(report.buildOutputPathDigest);
+      const previous = vmEvidence.get(vm);
+      const current = {
+        cacheArtifact: report.cache.injectedArtifactSha256,
+        cachePath: report.cache.pathDigest,
+        identity: report.vmIdentityDigest,
+        workspace: report.workspacePathDigest,
+      };
+      if (previous && canonicalize(previous) !== canonicalize(current)) {
+        throw new ManifestCiError(`${label} changes VM, workspace, or injected cache identity between profiles`);
+      }
+      vmEvidence.set(vm, current);
+      windowsReplays += 1;
+    }
+  }
+  const first = vmEvidence.get("a");
+  const second = vmEvidence.get("b");
+  if (
+    first.identity === second.identity || first.workspace === second.workspace || first.cachePath === second.cachePath ||
+    first.cacheArtifact !== second.cacheArtifact
+  ) throw new ManifestCiError("Windows Offline Proof requires two independent VMs and roots with the same injected cache identity");
+  const proofEntries = await Promise.all(proofFiles.map(async (relativePath) => ({
+    path: relativePath,
+    sha256: byteDigest(await readFile(path.join(proofRoot, ...relativePath.split("/")))),
+  })));
+  const targetOrder = new Map([["linux-x86_64-gnu", 0], ["windows-x86_64-msvc", 1]]);
+  const profileOrder = new Map([["debug", 0], ["release", 1]]);
+  builds.sort((left, right) =>
+    targetOrder.get(left.target) - targetOrder.get(right.target) ||
+    profileOrder.get(left.profile) - profileOrder.get(right.profile));
+  await atomicWrite(path.resolve(required(options, "--out")), jsonBytes({
+    builds,
+    candidate,
+    candidateIds: [candidateId],
+    evidenceDigest: digest({ candidateEvidenceDigest, entries: proofEntries, schemaVersion: "1" }),
+    proof: "Offline Proof",
+    requiredEvidence: {
+      hostedLinux: `${hostedLinux}/2`,
+      linuxMinimumRuntime: `${linuxMinimumRuntime}/1`,
+      windowsIndependentVms: `${vmEvidence.size}/2`,
+      windowsReplays: `${windowsReplays}/2`,
+    },
+    schemaVersion: "1",
+    status: "success",
+  }));
 }
 
 async function verdict(options) {
@@ -650,6 +1093,7 @@ async function verdict(options) {
     sha256: `sha256:${createHash("sha256").update(await readFile(path.join(root, ...relativePath.split("/")))).digest("hex")}`,
   })));
   await atomicWrite(output, jsonBytes({
+    candidateIds: plan.candidates.map((candidatePlan) => candidatePlan.id),
     evidenceDigest: digest({ entries, schemaVersion: "1" }),
     evidenceRetentionDays: "90",
     promotionState: "Verified Candidate",
@@ -754,6 +1198,10 @@ async function main() {
     await tagPolicy(parseOptions(arguments_, new Set(["--before", "--after", "--out"])));
   } else if (command === "verdict") {
     await verdict(parseOptions(arguments_, new Set(["--evidence", "--job-results", "--out"])));
+  } else if (command === "offline-proof") {
+    await offlineProof(parseOptions(arguments_, new Set([
+      "--candidate-evidence", "--verified-verdict", "--candidate-id", "--proof-evidence", "--out",
+    ])));
   } else {
     throw new ManifestCiError(`unsupported command: ${command ?? "<missing>"}`);
   }
