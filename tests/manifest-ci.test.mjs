@@ -964,7 +964,7 @@ test("candidate baseline switches to a default that resolves to an immutable Sta
   }
 });
 
-test("manifest PR gate cannot create or drift the first Stable default in this milestone", async () => {
+test("manifest PR gate rejects default creation or drift without a valid release transaction", async () => {
   const product = "1".repeat(40);
   const agent = "2".repeat(40);
   for (const mutation of ["create", "drift"]) {

@@ -298,6 +298,108 @@ node tools/manifest-ci.mjs offline-proof `
 The result is an `Offline Proof` prerequisite only. It does not declare the
 Candidate Promotable or Stable; Owner-gated promotion remains a separate step.
 
+## Owner-gated promotion transaction
+
+Promotion is a fail-closed, three-commit transaction. The release workflow must
+run these commands from trusted Manifest Repository source, and its
+`protected-release-environment` must authenticate the human Release Owner. The
+JSON approval record is evidence of that external control; it is not a
+replacement for configuring the environment or branch ruleset.
+
+First commit the candidate's immutable version snapshot by itself. Its path is
+`snapshots/tsfg-v<product-version>.xml`, and it must already be the exact
+snapshot named by the Verified Candidate and Offline Proof. The product tag and
+non-Stable release materials, including external checksums for both Tier 1
+targets, must also be fixed before the next command runs.
+
+Create a provisional evidence directory containing exactly:
+
+- `verified-candidate.json` from the successful Manifest PR verdict;
+- `offline-proof.json` from the successful minimum Tier 1 proof;
+- `version-readiness.json` binding `status: "ready"`, Product Version, and
+  Candidate content address;
+- `owner-approval.json` binding the same version and Candidate to a human
+  `Release Owner`, action `promote-stable`, and source
+  `protected-release-environment`; its `additionalApprovals` array records every
+  other applicable `Contracts Owner` or `Integration Owner` approval, and each
+  entry must also be a unique human approval rather than a bot decision;
+- `product-tag.json` binding the immutable `tsfg-v<version>` tag to the proven
+  product commit;
+- `release-materials.json` binding fixed, non-Stable archive, Artifact
+  Manifest, external-checksum, and Build Identity digests for both Tier 1
+  targets; and
+- `bundle.json`, whose sorted `entries` hash the six files above and whose
+  `contentAddress` is the canonical JSON digest of
+  `{ entries, schemaVersion: "1" }`. The bundle never hashes itself.
+
+Record the versioned, self-reference-free Release Evidence and Promotable
+state, then commit both files before attempting Stable promotion:
+
+```powershell
+node tools/manifest-ci.mjs record-release-evidence `
+    --repository . `
+    --version 0.1.0 `
+    --bundle C:\trusted\tsfg-v0.1.0-provisional
+
+git add releases/tsfg-v0.1.0
+git commit -m "release: record tsfg-v0.1.0 evidence"
+```
+
+The generated `releases/tsfg-v0.1.0/evidence.json` binds the already-fixed
+snapshot, product tag, external checksums, Candidate, and provisional bundle.
+It deliberately contains neither its own digest nor a future manifest commit
+OID, so the product tag and Build Identity can be reproduced without the later
+record. Manifest CI makes this evidence immutable once committed.
+
+Only the authenticated human named in that evidence may create the final
+default-manifest change:
+
+```powershell
+node tools/manifest-ci.mjs promote-stable `
+    --repository . `
+    --version 0.1.0 `
+    --actor $env:GITHUB_ACTOR
+
+git add default.xml releases
+git commit -m "release: promote tsfg-v0.1.0 Stable"
+```
+
+`default.xml` is written last and byte-for-byte equals the immutable snapshot;
+that final commit is the Stable commit point. Before the first Stable the file
+does not exist. A later Stable promotion atomically marks the prior current
+release `Superseded`. Missing, skipped, failed, malformed, uncommitted, or
+candidate-mismatched evidence prevents the transition, as does a bot actor.
+
+Post-Stable publication metadata is separate from Stable identity. It may be
+finalized once and replayed idempotently with identical input; a conflicting
+retry fails without changing `default.xml`, the snapshot, evidence, or Stable
+state:
+
+```powershell
+node tools/manifest-ci.mjs finalize-release `
+    --repository . `
+    --version 0.1.0 `
+    --metadata C:\trusted\tsfg-v0.1.0-publication.json
+```
+
+Rollback also requires a protected-environment approval by a human Release
+Owner. The approval binds `fromVersion`, `toVersion`, and a non-empty reason:
+
+```powershell
+node tools/manifest-ci.mjs rollback `
+    --repository . `
+    --approval C:\trusted\rollback.json
+
+git add default.xml releases
+git commit -m "release: withdraw tsfg-v0.2.0 and roll back to v0.1.0"
+```
+
+The target must be an earlier release whose Git history proves it was Stable.
+Rollback writes a new commit, repoints `default.xml` to that unchanged snapshot,
+and moves only the current bad release from `Stable` to `Withdrawn`. It does not
+move a product tag, modify a historical snapshot or Release Evidence, revive a
+`Superseded` state, or rewrite any prior commit.
+
 The trusted workflow runs only on a self-hosted runner carrying the
 `tsfg-tier1-vm-controller` label. Repository variable
 `TSFG_TIER1_VM_CONTROLLER` must be the absolute path of the host-controlled
