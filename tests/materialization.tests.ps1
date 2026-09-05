@@ -46,7 +46,12 @@ exit /b 0
     $agentProject = @($manifest.manifest.project | Where-Object path -eq ".agents")
     $agentProject.SetAttribute("revision", $agentRevision)
     $manifest.Save((Join-Path $manifestRoot "bootstrap/r00.xml"))
-    Copy-Item -LiteralPath (Join-Path $manifestRoot "bootstrap/r00.xml") -Destination (Join-Path $path ".repo/manifest.xml")
+    Set-Content -LiteralPath (Join-Path $path ".repo/manifest.xml") -Encoding utf8NoBOM -Value @'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <include name="bootstrap/r00.xml" />
+</manifest>
+'@
     return $path
 }
 

@@ -15,6 +15,8 @@ Set-StrictMode -Version Latest
 $workspace = [System.IO.Path]::GetFullPath($WorkspaceRoot).TrimEnd('\', '/')
 $workspacePrefix = $workspace + [System.IO.Path]::DirectorySeparatorChar
 $manifestPath = Join-Path $workspace ".repo/manifest.xml"
+$manifestRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace ".repo/manifests")).TrimEnd('\', '/')
+$manifestRootPrefix = $manifestRoot + [System.IO.Path]::DirectorySeparatorChar
 $agentRoot = Join-Path $workspace ".agents"
 $mappings = @(
     @{ Destination = "AGENTS.md"; Source = ".agents/AGENTS.md" },
@@ -33,6 +35,44 @@ function Get-CanonicalPath {
     param([Parameter(Mandatory)] [string] $Path)
 
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
+
+function Find-AgentProject {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [hashtable] $Visited
+    )
+
+    $canonicalPath = Get-CanonicalPath $Path
+    if ($Visited.ContainsKey($canonicalPath)) {
+        throw "manifest include cycle detected at $canonicalPath"
+    }
+    $Visited[$canonicalPath] = $true
+
+    [xml] $document = Get-Content -LiteralPath $canonicalPath -Raw
+    $matches = @($document.SelectNodes("/manifest/project[@path='.agents']"))
+    foreach ($include in @($document.SelectNodes("/manifest/include"))) {
+        $includeName = [string] $include.GetAttribute("name")
+        if ([string]::IsNullOrWhiteSpace($includeName) -or [System.IO.Path]::IsPathRooted($includeName)) {
+            throw "manifest include name is not a repository-relative path: $includeName"
+        }
+        $includePath = Get-CanonicalPath (Join-Path $manifestRoot $includeName)
+        if (-not $includePath.StartsWith($manifestRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "manifest include escapes the manifest repository: $includeName"
+        }
+        $includedProject = Find-AgentProject -Path $includePath -Visited $Visited
+        if ($null -ne $includedProject) {
+            $matches += $includedProject
+        }
+    }
+
+    if ($matches.Count -gt 1) {
+        throw "selected manifest contains multiple .agents projects"
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    return $null
 }
 
 function Get-Sha256 {
@@ -55,9 +95,8 @@ function Get-Sha256 {
 }
 
 try {
-    [xml] $manifest = Get-Content -LiteralPath $manifestPath -Raw
-    $agentProject = $manifest.SelectSingleNode("/manifest/project[@path='.agents']")
-    $agentRevision = [string] $agentProject.revision
+    $agentProject = Find-AgentProject -Path $manifestPath -Visited @{}
+    $agentRevision = if ($null -eq $agentProject) { "" } else { [string] $agentProject.GetAttribute("revision") }
 }
 catch {
     Stop-Activation "cannot read the selected bootstrap manifest: $($_.Exception.Message)"
