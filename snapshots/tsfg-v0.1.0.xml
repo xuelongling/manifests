@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MIT -->
 <manifest>
   <remote name="github-xuelongling" fetch="https://github.com/xuelongling/" />
 
@@ -6,14 +7,14 @@
     name="tsfg.git"
     path="tsfg"
     remote="github-xuelongling"
-    revision="215d0a3c7507e23a0870c256bba784a8994313e4"
+    revision="0694bb82ad2c4cbdbb91dc74575ba5432df7c9dd"
     upstream="refs/heads/main" />
 
   <project
     name=".agents.git"
     path=".agents"
     remote="github-xuelongling"
-    revision="e29864164e66d2ac0ff3091ccd533682d12bf635"
+    revision="7d914a25dff18cfed839dced7444f682df7b92b6"
     upstream="refs/heads/main">
     <linkfile src="AGENTS.md" dest="AGENTS.md" />
     <linkfile src="codex/config.toml" dest=".codex/config.toml" />
