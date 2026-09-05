@@ -489,7 +489,10 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
     await mkdir(path.join(sandbox, "snapshots"));
     await writeFile(
       path.join(sandbox, "snapshots", "tsfg-v0.1.0.xml"),
-      manifest(nextProduct, baseAgent),
+      manifest(nextProduct, baseAgent).replace(
+        "<manifest>",
+        "<!-- SPDX-License-Identifier: MIT -->\n<manifest>",
+      ),
     );
     runGit(sandbox, "add", ".");
     runGit(sandbox, "commit", "-m", "candidate snapshot");

@@ -82,6 +82,7 @@ function parseManifestElements(xml, label) {
       continue;
     }
     if (/^<\?xml\s+version="1\.0"\s+encoding="UTF-8"\?>$/.test(value) && nodes.length === 0 && stack.length === 0) continue;
+    if (value === "<!-- SPDX-License-Identifier: MIT -->" && nodes.length === 0 && stack.length === 0) continue;
     if (/^<\//.test(value)) {
       const closing = /^<\/([A-Za-z][A-Za-z0-9_-]*)\s*>$/.exec(value);
       if (!closing || stack.at(-1)?.name !== closing[1]) throw new ManifestCiError(`${label} has mismatched XML elements`);
