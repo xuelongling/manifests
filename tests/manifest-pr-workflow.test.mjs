@@ -157,6 +157,8 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
   assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*sudo unshare --mount --net/);
   assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*tsfg-build\.cmd test/);
   assert.match(compatibility, /tsfg-build(?:\.cmd)? prefetch/);
+  assert.match(compatibility, /manifest-compat-tool-cache\/\$\{\{ matrix\.target \}\}/);
+  assert.doesNotMatch(compatibility, /manifest-compatibility-\$\{\{ matrix\.candidate\.id \}\}\/tool-cache/);
 });
 
 test("reproducibility comparators are build-free and compare producer a with producer b", async () => {

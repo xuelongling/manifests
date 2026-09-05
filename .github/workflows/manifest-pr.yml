@@ -391,7 +391,7 @@ jobs:
         shell: bash
         run: |
           root="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}"
-          export TSFG_CACHE_DIR="$root/tool-cache"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-compat-tool-cache/${{ matrix.target }}"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
           export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
@@ -402,7 +402,7 @@ jobs:
         shell: pwsh
         run: |
           $root = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}"
-          $env:TSFG_CACHE_DIR = "$root/tool-cache"
+          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-compat-tool-cache/${{ matrix.target }}"
           $env:TSFG_BOOTSTRAP_NODE = (Get-Command node.exe -ErrorAction Stop).Source
           $env:TSFG_BOOTSTRAP_NODE_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_NODE -Algorithm SHA256).Hash.ToLowerInvariant()
           $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
@@ -415,7 +415,7 @@ jobs:
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
-          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/tool-cache"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-compat-tool-cache/${{ matrix.target }}"
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           offline() {
@@ -439,7 +439,7 @@ jobs:
         run: |
           $input = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           $report = "$env:GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
-          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/tool-cache"
+          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-compat-tool-cache/${{ matrix.target }}"
           $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
           $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
           & .\.ci\product\eng\tsfg-build.cmd test --target '${{ matrix.target }}' --compatibility-baseline "$input/baseline.json" --compatibility-candidate "$input/candidate.json" --report $report
