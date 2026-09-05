@@ -43,6 +43,26 @@ async function writeJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value)}\n`);
 }
 
+async function writeAuthorization(root, operation, actor = "release-owner") {
+  const filePath = path.join(root, `authorization-${operation}-${Math.random().toString(16).slice(2)}.json`);
+  await writeJson(filePath, {
+    actor: { login: actor, type: "User" },
+    environment: "protected-release-environment",
+    environmentReviews: [],
+    operation,
+    repository: "xuelongling/manifests",
+    reviewEvidenceSha256: byteDigest("reviews"),
+    runEvidenceSha256: byteDigest("run"),
+    schemaVersion: "1",
+    source: "github-actions",
+    workflow: {
+      commit: runGit(path.join(root, "repository"), "rev-parse", "HEAD"), path: ".github/workflows/release-owner.yml",
+      ref: "refs/heads/main", runId: "123",
+    },
+  });
+  return filePath;
+}
+
 function manifest(productRevision, agentRevision) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <manifest>
@@ -139,8 +159,10 @@ async function makePromotable(root, repository, version, productRevision, agentR
   await writeFile(path.join(repository, "snapshots", `tsfg-v${version}.xml`), snapshot);
   const snapshotCommit = commitAll(repository, `snapshot ${version}`);
   const bundle = await writeBundle(root, { version, productRevision, agentRevision, manifestRevision: snapshotCommit, ...options });
+  const authorization = await writeAuthorization(root, "record-release-evidence", options.owner ?? "release-owner");
   const result = invoke([
     "record-release-evidence", "--repository", repository, "--version", version, "--bundle", bundle.bundleRoot,
+    "--authorization", authorization,
   ], repository);
   assert.equal(result.status, 0, result.stderr);
   const evidenceCommit = commitAll(repository, `evidence ${version}`);
@@ -149,8 +171,9 @@ async function makePromotable(root, repository, version, productRevision, agentR
 
 async function makeStable(root, repository, version, productRevision, agentRevision, options = {}) {
   const fixture = await makePromotable(root, repository, version, productRevision, agentRevision, options);
+  const authorization = await writeAuthorization(root, "promote-stable", options.owner ?? "release-owner");
   const result = invoke([
-    "promote-stable", "--repository", repository, "--version", version, "--actor", options.owner ?? "release-owner",
+    "promote-stable", "--repository", repository, "--version", version, "--authorization", authorization,
   ], repository);
   assert.equal(result.status, 0, result.stderr);
   const stableCommit = commitAll(repository, `stable ${version}`);
@@ -174,15 +197,17 @@ test("first Stable is a three-commit, Owner-gated transaction with self-referenc
     assert.equal(evidenceBytes.includes(byteDigest(evidenceBytes)), false);
     assert.equal(runGit(repository, "merge-base", "--is-ancestor", fixture.snapshotCommit, fixture.evidenceCommit), "");
 
+    const botAuthorization = await writeAuthorization(root, "promote-stable", "release-bot[bot]");
     const bot = invoke([
-      "promote-stable", "--repository", repository, "--version", "0.1.0", "--actor", "release-bot[bot]",
+      "promote-stable", "--repository", repository, "--version", "0.1.0", "--authorization", botAuthorization,
     ], repository);
     assert.equal(bot.status, 1);
-    assert.match(bot.stderr, /human Release Owner/i);
+    assert.match(bot.stderr, /human (?:GitHub user|Release Owner)/i);
     assert.equal(await readFile(path.join(repository, "default.xml"), "utf8").catch(() => undefined), undefined);
 
+    const promotionAuthorization = await writeAuthorization(root, "promote-stable");
     const promoted = invoke([
-      "promote-stable", "--repository", repository, "--version", "0.1.0", "--actor", "release-owner",
+      "promote-stable", "--repository", repository, "--version", "0.1.0", "--authorization", promotionAuthorization,
     ], repository);
     assert.equal(promoted.status, 0, promoted.stderr);
     assert.equal(await readFile(path.join(repository, "default.xml"), "utf8"), fixture.snapshot);
@@ -228,8 +253,10 @@ test("Promotable fails closed for every missing or inconsistent gate", async (t)
         const { bundleRoot } = await writeBundle(root, {
           version: "0.1.0", productRevision: "3".repeat(40), agentRevision: "4".repeat(40), manifestRevision, mutate,
         });
+        const authorization = await writeAuthorization(root, "record-release-evidence");
         const result = invoke([
           "record-release-evidence", "--repository", repository, "--version", "0.1.0", "--bundle", bundleRoot,
+          "--authorization", authorization,
         ], repository);
         assert.equal(result.status, 1, `${name} unexpectedly passed`);
         assert.match(result.stderr, message);
@@ -256,8 +283,10 @@ test("evidence must be content-addressed, complete, and committed before Stable"
     const bundle = JSON.parse(await readFile(bundlePath));
     bundle.entries[0].sha256 = byteDigest("forged");
     await writeJson(bundlePath, bundle);
+    const authorization = await writeAuthorization(root, "record-release-evidence");
     const rejected = invoke([
       "record-release-evidence", "--repository", repository, "--version", "0.1.0", "--bundle", bundleRoot,
+      "--authorization", authorization,
     ], repository);
     assert.equal(rejected.status, 1);
     assert.match(rejected.stderr, /content address/i);
@@ -267,9 +296,11 @@ test("evidence must be content-addressed, complete, and committed before Stable"
     });
     assert.equal(invoke([
       "record-release-evidence", "--repository", repository, "--version", "0.1.0", "--bundle", valid.bundleRoot,
+      "--authorization", authorization,
     ], repository).status, 0);
+    const promotionAuthorization = await writeAuthorization(root, "promote-stable");
     const premature = invoke([
-      "promote-stable", "--repository", repository, "--version", "0.1.0", "--actor", "release-owner",
+      "promote-stable", "--repository", repository, "--version", "0.1.0", "--authorization", promotionAuthorization,
     ], repository);
     assert.equal(premature.status, 1);
     assert.match(premature.stderr, /clean.*worktree/i);
@@ -290,12 +321,21 @@ test("post-Stable publication metadata is idempotent and cannot rewrite Stable i
       publications: [{ immutableId: "release-100", kind: "github-release", url: "https://github.com/xuelongling/tsfg/releases/tag/tsfg-v0.1.0" }],
       schemaVersion: "1", status: "complete",
     });
-    const command = ["finalize-release", "--repository", repository, "--version", "0.1.0", "--metadata", metadataPath];
+    const authorization = await writeAuthorization(root, "finalize-release");
+    const command = [
+      "finalize-release", "--repository", repository, "--version", "0.1.0", "--metadata", metadataPath,
+      "--authorization", authorization,
+    ];
     assert.equal(invoke(command, repository).status, 0);
     const publicationCommit = commitAll(repository, "finalize publication");
     const defaultBefore = await readFile(path.join(repository, "default.xml"));
     const stateBefore = await readFile(path.join(repository, "releases", "tsfg-v0.1.0", "state.json"));
-    assert.equal(invoke(command, repository).status, 0);
+    const replayAuthorization = await writeAuthorization(root, "finalize-release");
+    const replayCommand = [
+      "finalize-release", "--repository", repository, "--version", "0.1.0", "--metadata", metadataPath,
+      "--authorization", replayAuthorization,
+    ];
+    assert.equal(invoke(replayCommand, repository).status, 0);
     assert.equal(runGit(repository, "status", "--porcelain"), "");
 
     await writeJson(metadataPath, {
@@ -303,7 +343,7 @@ test("post-Stable publication metadata is idempotent and cannot rewrite Stable i
       publications: [{ immutableId: "release-CHANGED", kind: "github-release", url: "https://github.com/xuelongling/tsfg/releases/tag/tsfg-v0.1.0" }],
       schemaVersion: "1", status: "complete",
     });
-    const conflict = invoke(command, repository);
+    const conflict = invoke(replayCommand, repository);
     assert.equal(conflict.status, 1);
     assert.match(conflict.stderr, /immutable/i);
     assert.deepEqual(await readFile(path.join(repository, "default.xml")), defaultBefore);
@@ -336,7 +376,10 @@ test("rollback is a new commit that withdraws the bad release without changing o
       fromVersion: "0.2.0", reason: "fixture regression", role: "Release Owner", schemaVersion: "1",
       source: "protected-release-environment", toVersion: "0.1.0",
     });
-    const rolledBack = invoke(["rollback", "--repository", repository, "--approval", approvalPath], repository);
+    const authorization = await writeAuthorization(root, "rollback");
+    const rolledBack = invoke([
+      "rollback", "--repository", repository, "--approval", approvalPath, "--authorization", authorization,
+    ], repository);
     assert.equal(rolledBack.status, 0, rolledBack.stderr);
     assert.equal(await readFile(path.join(repository, "default.xml"), "utf8"), first.snapshot);
     const badState = JSON.parse(await readFile(path.join(repository, "releases", "tsfg-v0.2.0", "state.json")));
@@ -397,6 +440,34 @@ test("manual default creation and Release Evidence mutation fail the repository 
     ], repository);
     assert.equal(mutation.status, 1);
     assert.match(mutation.stderr, /evidence\.json is immutable/i);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("release transaction authorization is mandatory and bound to the current main commit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-promotion-authorization-"));
+  try {
+    const repository = await initializeRepository(root);
+    const metadataPath = path.join(root, "publication.json");
+    await writeJson(metadataPath, {
+      productVersion: "0.1.0", publications: [], schemaVersion: "1", status: "complete",
+    });
+    const missing = invoke([
+      "finalize-release", "--repository", repository, "--version", "0.1.0", "--metadata", metadataPath,
+    ], repository);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /missing required option: --authorization/i);
+
+    const stale = await writeAuthorization(root, "finalize-release");
+    await writeFile(path.join(repository, "note.txt"), "advance main\n");
+    commitAll(repository, "advance protected main");
+    const rejected = invoke([
+      "finalize-release", "--repository", repository, "--version", "0.1.0", "--metadata", metadataPath,
+      "--authorization", stale,
+    ], repository);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /current protected main commit/i);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

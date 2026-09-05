@@ -7,6 +7,9 @@ import path from "node:path";
 import process from "node:process";
 
 const manifestRepositoryUrl = "https://github.com/xuelongling/manifests.git";
+const manifestRepositoryName = "xuelongling/manifests";
+const releaseEnvironment = "protected-release-environment";
+const releaseOwnerWorkflowPath = ".github/workflows/release-owner.yml";
 const bootstrapRevision = "d94f4e6bff9aa980b18b0df94e133559e4b61240";
 const completeOid = /^[0-9a-f]{40}$/;
 
@@ -740,6 +743,112 @@ function requireAdditionalOwnerApprovals(approval, label) {
   }
 }
 
+function requireHumanActor(actor, label) {
+  if (
+    !actor || typeof actor !== "object" || Array.isArray(actor) || actor.type !== "User" ||
+    typeof actor.login !== "string" || actor.login === "" || /\[bot\]$/i.test(actor.login)
+  ) throw new ManifestCiError(`${label} must be a human GitHub user`);
+  return { login: actor.login, type: actor.type };
+}
+
+function normalizedWorkflowPath(value) {
+  if (typeof value !== "string") return undefined;
+  const [filePath, ref] = value.split("@", 2);
+  if (ref !== undefined && !["main", "refs/heads/main"].includes(ref)) return undefined;
+  return filePath;
+}
+
+async function releaseOwnerContext(options) {
+  const repository = path.resolve(required(options, "--repository"));
+  const runPath = path.resolve(required(options, "--run"));
+  const reviewsPath = path.resolve(required(options, "--reviews"));
+  const runId = required(options, "--run-id");
+  const operation = required(options, "--operation");
+  const actorLogin = required(options, "--actor");
+  const triggeringActorLogin = required(options, "--triggering-actor");
+  const ref = required(options, "--ref");
+  const sha = requireOid(required(options, "--sha"), "release workflow commit");
+  if (![
+    "record-release-evidence", "promote-stable", "finalize-release", "rollback",
+  ].includes(operation)) throw new ManifestCiError("unsupported Release Owner operation");
+
+  const runBytes = await readFile(runPath);
+  const reviewsBytes = await readFile(reviewsPath);
+  const run = parseReleaseRecord(runBytes.toString("utf8"), "Release Owner workflow run");
+  const reviews = parseReleaseRecord(reviewsBytes.toString("utf8"), "Release Owner environment reviews");
+  if (!Array.isArray(reviews)) throw new ManifestCiError("Release Owner environment reviews must be an array");
+  const actor = requireHumanActor(run.actor, "Release Owner workflow actor");
+  const triggeringActor = requireHumanActor(run.triggering_actor, "Release Owner workflow triggering actor");
+  if (
+    String(run.id) !== runId || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
+    run.head_sha !== sha || normalizedWorkflowPath(run.path) !== releaseOwnerWorkflowPath ||
+    run.repository?.full_name !== manifestRepositoryName || run.head_repository?.full_name !== manifestRepositoryName ||
+    ref !== "refs/heads/main" || actor.login !== actorLogin || triggeringActor.login !== triggeringActorLogin ||
+    actor.login !== triggeringActor.login
+  ) throw new ManifestCiError("Release Owner operation must be a same-human workflow_dispatch from protected manifest main");
+  const head = git(repository, ["rev-parse", "HEAD"]).stdout.trim();
+  if (head !== sha) throw new ManifestCiError("Release Owner workflow must execute the exact protected main commit");
+  const workflowSource = gitFile(repository, sha, releaseOwnerWorkflowPath, true);
+  if (
+    workflowSource === undefined ||
+    !/^\s{4}environment:\s*protected-release-environment\s*$/m.test(workflowSource)
+  ) throw new ManifestCiError("trusted Release Owner workflow does not enter the protected release environment");
+
+  const environmentReviews = [];
+  for (const review of reviews) {
+    const applies = Array.isArray(review?.environments) &&
+      review.environments.some((environment) => environment?.name === releaseEnvironment);
+    if (!applies) continue;
+    if (review.state === "rejected") throw new ManifestCiError("protected release environment was rejected");
+    if (review.state !== "approved") continue;
+    const reviewer = requireHumanActor(review.user, "protected release environment reviewer");
+    if (!environmentReviews.some((entry) => entry.login === reviewer.login)) environmentReviews.push(reviewer);
+  }
+  environmentReviews.sort((left, right) => Buffer.from(left.login).compare(Buffer.from(right.login)));
+  await atomicWrite(path.resolve(required(options, "--out")), jsonBytes({
+    actor,
+    environment: releaseEnvironment,
+    environmentReviews,
+    operation,
+    repository: manifestRepositoryName,
+    runEvidenceSha256: byteDigest(runBytes),
+    reviewEvidenceSha256: byteDigest(reviewsBytes),
+    schemaVersion: "1",
+    source: "github-actions",
+    workflow: { commit: sha, path: releaseOwnerWorkflowPath, ref, runId },
+  }));
+}
+
+async function readReleaseAuthorization(options, operation, repository) {
+  const authorization = await readJson(
+    path.resolve(required(options, "--authorization")), "Release Owner workflow authorization",
+  );
+  requireExactFields(authorization, [
+    "actor", "environment", "environmentReviews", "operation", "repository", "reviewEvidenceSha256",
+    "runEvidenceSha256", "schemaVersion", "source", "workflow",
+  ], "Release Owner workflow authorization");
+  requireExactFields(authorization.actor, ["login", "type"], "Release Owner workflow authorization actor");
+  requireExactFields(authorization.workflow, ["commit", "path", "ref", "runId"], "Release Owner workflow authorization source");
+  const actor = requireHumanActor(authorization.actor, "Release Owner workflow authorization actor");
+  if (
+    authorization.schemaVersion !== "1" || authorization.source !== "github-actions" ||
+    authorization.environment !== releaseEnvironment || authorization.repository !== manifestRepositoryName ||
+    authorization.operation !== operation || authorization.workflow.path !== releaseOwnerWorkflowPath ||
+    authorization.workflow.ref !== "refs/heads/main" || !/^\d+$/.test(authorization.workflow.runId) ||
+    !completeOid.test(authorization.workflow.commit) || !Array.isArray(authorization.environmentReviews)
+  ) throw new ManifestCiError(`invalid Release Owner workflow authorization for ${operation}`);
+  requireDigest(authorization.runEvidenceSha256, "Release Owner run evidence digest");
+  requireDigest(authorization.reviewEvidenceSha256, "Release Owner review evidence digest");
+  for (const reviewer of authorization.environmentReviews) {
+    requireExactFields(reviewer, ["login", "type"], "Release Owner environment reviewer");
+    requireHumanActor(reviewer, "Release Owner environment reviewer");
+  }
+  if (git(repository, ["rev-parse", "HEAD"]).stdout.trim() !== authorization.workflow.commit) {
+    throw new ManifestCiError("Release Owner workflow authorization does not bind the current protected main commit");
+  }
+  return { actor: actor.login, authorization };
+}
+
 function requireCleanRepository(repository) {
   if (git(repository, ["status", "--porcelain", "--untracked-files=all"]).stdout !== "") {
     throw new ManifestCiError("release transaction requires a clean Manifest Repository worktree");
@@ -998,10 +1107,14 @@ async function recordReleaseEvidence(options) {
   const repository = path.resolve(required(options, "--repository"));
   const version = requireVersion(required(options, "--version"));
   const bundleRoot = path.resolve(required(options, "--bundle"));
+  const authorization = await readReleaseAuthorization(options, "record-release-evidence", repository);
   requireCleanRepository(repository);
   const paths = releasePaths(version);
   await requireAbsentVersionIdentity(repository, paths);
   const input = validatePromotionBundle(await readProvisionalBundle(bundleRoot), version);
+  if (input.ownerApproval.actor.login !== authorization.actor) {
+    throw new ManifestCiError("Release Evidence owner must match the authenticated Release Owner workflow actor");
+  }
   const head = git(repository, ["rev-parse", "HEAD"]).stdout.trim();
   if (git(repository, ["merge-base", "--is-ancestor", input.candidate.manifestRevision, head], true).status !== 0) {
     throw new ManifestCiError("candidate snapshot commit must already be an ancestor of the evidence commit");
@@ -1075,7 +1188,7 @@ function committedRelease(repository, version) {
 async function promoteStable(options) {
   const repository = path.resolve(required(options, "--repository"));
   const version = requireVersion(required(options, "--version"));
-  const actor = required(options, "--actor");
+  const { actor } = await readReleaseAuthorization(options, "promote-stable", repository);
   requireCleanRepository(repository);
   const release = committedRelease(repository, version);
   if (release.state.promotionState !== "Promotable") throw new ManifestCiError("only a Promotable release can become Stable");
@@ -1110,6 +1223,7 @@ async function finalizeRelease(options) {
   const repository = path.resolve(required(options, "--repository"));
   const version = requireVersion(required(options, "--version"));
   const metadata = await readJson(path.resolve(required(options, "--metadata")), "post-Stable publication metadata");
+  await readReleaseAuthorization(options, "finalize-release", repository);
   requireCleanRepository(repository);
   const release = committedRelease(repository, version);
   if (release.state.promotionState !== "Stable") throw new ManifestCiError("post-Stable metadata requires the current Stable release");
@@ -1154,6 +1268,7 @@ function wasHistoricallyStable(repository, version, revision) {
 async function rollbackRelease(options) {
   const repository = path.resolve(required(options, "--repository"));
   const approval = await readJson(path.resolve(required(options, "--approval")), "rollback approval");
+  const authorization = await readReleaseAuthorization(options, "rollback", repository);
   requireCleanRepository(repository);
   requireExactFields(approval, [
     "action", "actor", "decision", "fromVersion", "reason", "role", "schemaVersion", "source", "toVersion",
@@ -1162,6 +1277,9 @@ async function rollbackRelease(options) {
   const toVersion = requireVersion(approval.toVersion, "rollback target version");
   if (fromVersion === toVersion || !approval.reason) throw new ManifestCiError("rollback requires distinct releases and a reason");
   const actor = requireHumanOwner(approval, "rollback approval", { action: "rollback", fromVersion, reason: approval.reason, toVersion });
+  if (actor !== authorization.actor) {
+    throw new ManifestCiError("rollback approver must match the authenticated Release Owner workflow actor");
+  }
   const current = committedRelease(repository, fromVersion);
   const target = committedRelease(repository, toVersion);
   const defaultXml = gitFile(repository, current.head, "default.xml", true);
@@ -2023,14 +2141,19 @@ async function main() {
       "--repository", "--candidate-evidence", "--verified-verdict", "--candidate-id", "--candidate-run", "--candidate-run-id",
       "--controller-run", "--controller-run-id", "--proof-evidence", "--out",
     ])));
+  } else if (command === "release-owner-context") {
+    await releaseOwnerContext(parseOptions(arguments_, new Set([
+      "--repository", "--run", "--reviews", "--run-id", "--operation", "--actor", "--triggering-actor",
+      "--ref", "--sha", "--out",
+    ])));
   } else if (command === "record-release-evidence") {
-    await recordReleaseEvidence(parseOptions(arguments_, new Set(["--repository", "--version", "--bundle"])));
+    await recordReleaseEvidence(parseOptions(arguments_, new Set(["--repository", "--version", "--bundle", "--authorization"])));
   } else if (command === "promote-stable") {
-    await promoteStable(parseOptions(arguments_, new Set(["--repository", "--version", "--actor"])));
+    await promoteStable(parseOptions(arguments_, new Set(["--repository", "--version", "--authorization"])));
   } else if (command === "finalize-release") {
-    await finalizeRelease(parseOptions(arguments_, new Set(["--repository", "--version", "--metadata"])));
+    await finalizeRelease(parseOptions(arguments_, new Set(["--repository", "--version", "--metadata", "--authorization"])));
   } else if (command === "rollback") {
-    await rollbackRelease(parseOptions(arguments_, new Set(["--repository", "--approval"])));
+    await rollbackRelease(parseOptions(arguments_, new Set(["--repository", "--approval", "--authorization"])));
   } else {
     throw new ManifestCiError(`unsupported command: ${command ?? "<missing>"}`);
   }
