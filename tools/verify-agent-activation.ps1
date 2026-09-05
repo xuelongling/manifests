@@ -14,7 +14,7 @@ Set-StrictMode -Version Latest
 
 $workspace = [System.IO.Path]::GetFullPath($WorkspaceRoot).TrimEnd('\', '/')
 $workspacePrefix = $workspace + [System.IO.Path]::DirectorySeparatorChar
-$manifestPath = Join-Path $workspace ".repo/manifests/bootstrap/r00.xml"
+$manifestPath = Join-Path $workspace ".repo/manifest.xml"
 $agentRoot = Join-Path $workspace ".agents"
 $mappings = @(
     @{ Destination = "AGENTS.md"; Source = ".agents/AGENTS.md" },
@@ -63,7 +63,7 @@ catch {
     Stop-Activation "cannot read the selected bootstrap manifest: $($_.Exception.Message)"
 }
 if ($null -eq $agentProject -or $agentRevision -notmatch '^[0-9a-f]{40}$') {
-    Stop-Activation "cannot identify the pinned .agents commit in bootstrap/r00.xml"
+    Stop-Activation "cannot identify the pinned .agents commit in the selected manifest"
 }
 
 foreach ($relativeDirectory in @(".agents", ".agents/codex", ".codex")) {

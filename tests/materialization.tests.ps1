@@ -46,6 +46,7 @@ exit /b 0
     $agentProject = @($manifest.manifest.project | Where-Object path -eq ".agents")
     $agentProject.SetAttribute("revision", $agentRevision)
     $manifest.Save((Join-Path $manifestRoot "bootstrap/r00.xml"))
+    Copy-Item -LiteralPath (Join-Path $manifestRoot "bootstrap/r00.xml") -Destination (Join-Path $path ".repo/manifest.xml")
     return $path
 }
 
@@ -113,6 +114,9 @@ Test-Case "activation verifier does not depend on Get-FileHash module discovery"
     }
     if ($verifier -notmatch '\[System\.Security\.Cryptography\.SHA256\]::Create\(\)') {
         throw "activation verifier does not use an in-process SHA-256 implementation"
+    }
+    if ($verifier -notmatch '\.repo/manifest\.xml' -or $verifier -match '\.repo/manifests/bootstrap/r00\.xml') {
+        throw "activation verifier does not consume repo's selected manifest view"
     }
 }
 
