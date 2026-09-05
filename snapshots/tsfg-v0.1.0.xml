@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="github-xuelongling" fetch="https://github.com/xuelongling/" />
+
+  <project
+    name="tsfg.git"
+    path="tsfg"
+    remote="github-xuelongling"
+    revision="076964fabdff509630ba2c5c06d109537662d210"
+    upstream="refs/heads/main" />
+
+  <project
+    name=".agents.git"
+    path=".agents"
+    remote="github-xuelongling"
+    revision="97f3bd60e6a9490ab57b9065763fc3afaaa169f7"
+    upstream="refs/heads/main">
+    <linkfile src="AGENTS.md" dest="AGENTS.md" />
+    <linkfile src="codex/config.toml" dest=".codex/config.toml" />
+    <linkfile src="codex/hooks.json" dest=".codex/hooks.json" />
+  </project>
+</manifest>
