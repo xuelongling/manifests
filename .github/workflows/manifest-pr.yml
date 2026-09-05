@@ -188,7 +188,8 @@ jobs:
           root="$GITHUB_WORKSPACE/.ci/evidence/workspace/${{ matrix.candidate.id }}"
           manifest_source="file://$GITHUB_WORKSPACE"
           mkdir -p "$root"
-          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          git branch --force tsfg-ci-candidate "${{ matrix.candidate.manifestRevision }}"
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "tsfg-ci-candidate" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
           git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/tool-cache"
@@ -197,8 +198,9 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -257,7 +259,8 @@ jobs:
         run: |
           workspace="$RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
           manifest_source="file://$GITHUB_WORKSPACE"
-          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "${{ matrix.candidate.manifestRevision }}" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
+          git branch --force tsfg-ci-candidate "${{ matrix.candidate.manifestRevision }}"
+          (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "tsfg-ci-candidate" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
           git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
       - name: Materialize the resolved candidate on Windows
@@ -266,8 +269,10 @@ jobs:
         run: |
           $workspace = "$env:RUNNER_TEMP/manifest-${{ matrix.candidate.id }}-${{ matrix.producer }}/workspace"
           $manifestSource = "file:///" + $env:GITHUB_WORKSPACE.Replace('\', '/')
+          git branch --force tsfg-ci-candidate '${{ matrix.candidate.manifestRevision }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location $workspace
-          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" init -u $manifestSource -b '${{ matrix.candidate.manifestRevision }}' -m '${{ matrix.candidate.manifest }}' --repo-rev=v2.65
+          & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" init -u $manifestSource -b tsfg-ci-candidate -m '${{ matrix.candidate.manifest }}' --repo-rev=v2.65
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" sync --verify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -291,8 +296,9 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -382,8 +388,9 @@ jobs:
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
+          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            sudo unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -451,8 +458,9 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
+          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)

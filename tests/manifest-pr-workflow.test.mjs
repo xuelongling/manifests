@@ -107,7 +107,8 @@ test("every candidate is materialized and built by two isolated producers across
   assert.match(build, /ubuntu-24\.04/);
   assert.match(build, /windows-2025/);
   assert.match(build, /manifest-\$\{\{ matrix\.candidate\.id \}\}-\$\{\{ matrix\.producer \}\}\/workspace/);
-  assert.match(build, /repo\.py" init -u "\$manifest_source" -b "\$\{\{ matrix\.candidate\.manifestRevision \}\}" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
+  assert.match(build, /git branch --force tsfg-ci-candidate "\$\{\{ matrix\.candidate\.manifestRevision \}\}"/);
+  assert.match(build, /repo\.py" init -u "\$manifest_source" -b "tsfg-ci-candidate" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
   assert.match(build, /repo\.py" sync --verify/);
   assert.match(build, /git -C "\$workspace\/\.repo\/manifests" remote set-url origin "\$TSFG_MANIFEST_URL"/);
   assert.doesNotMatch(build, /materialize-agent-workspace\.ts|materialized-identity\.json/);
@@ -176,7 +177,9 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   const source = await workflow();
   for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const selectedJob = job(source, name);
+    assert.match(selectedJob, /sudo sysctl -q kernel\.apparmor_restrict_unprivileged_userns=0/, name);
     assert.match(selectedJob, /unshare --user --map-users "0:\$\(id -u\):1" --map-groups "0:\$\(id -g\):1"/, name);
+    assert.doesNotMatch(selectedJob, /sudo(?:\s+--[^\s]+)*\s+unshare/, name);
     assert.match(selectedJob, /--setgroups=deny --setuid 0 --setgid 0 --mount --net/, name);
     assert.match(selectedJob, /mount -t sysfs -o ro,nosuid,nodev,noexec sysfs \/sys/, name);
     assert.match(selectedJob, /ip link set lo up/, name);
@@ -197,7 +200,7 @@ test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git"
     const linuxJob = job(source, jobName);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
-    assert.match(linuxJob, /--preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256/);
+    assert.match(linuxJob, /unshare --user/);
   }
 });
 
