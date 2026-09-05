@@ -60,6 +60,16 @@ function Find-AgentProject {
         if (-not $includePath.StartsWith($manifestRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "manifest include escapes the manifest repository: $includeName"
         }
+        $cursor = $manifestRoot
+        foreach ($segment in $includePath.Substring($manifestRootPrefix.Length).Split(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            $cursor = Join-Path $cursor $segment
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "manifest include traverses a reparse point: $includeName"
+            }
+        }
         $includedProject = Find-AgentProject -Path $includePath -Visited $Visited
         if ($null -ne $includedProject) {
             $matches += $includedProject
@@ -99,7 +109,7 @@ try {
     $agentRevision = if ($null -eq $agentProject) { "" } else { [string] $agentProject.GetAttribute("revision") }
 }
 catch {
-    Stop-Activation "cannot read the selected bootstrap manifest: $($_.Exception.Message)"
+    Stop-Activation "cannot read the selected manifest: $($_.Exception.Message)"
 }
 if ($null -eq $agentProject -or $agentRevision -notmatch '^[0-9a-f]{40}$') {
     Stop-Activation "cannot identify the pinned .agents commit in the selected manifest"

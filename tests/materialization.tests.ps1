@@ -215,6 +215,39 @@ Test-Case "sync rejects activation paths that traverse a junction outside the wo
     }
 }
 
+Test-Case "sync rejects manifest includes that traverse a junction outside the manifest repository" {
+    $sandbox = New-MaterializationSandbox
+    $outside = Join-Path $temporaryRoot ("tsfg-materialization-manifest-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        Copy-Item -LiteralPath (Join-Path $sandbox ".repo/manifests/bootstrap/r00.xml") -Destination (Join-Path $outside "r00.xml")
+        New-Item -ItemType Junction -Path (Join-Path $sandbox ".repo/manifests/linked") -Target $outside | Out-Null
+        Set-Content -LiteralPath (Join-Path $sandbox ".repo/manifest.xml") -Encoding utf8NoBOM -Value @'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <include name="linked/r00.xml" />
+</manifest>
+'@
+
+        $result = Invoke-SandboxSync -Sandbox $sandbox
+        if ($result.ExitCode -eq 0) {
+            throw "sync accepted a manifest include through an out-of-repository junction"
+        }
+        if ($result.Output -notmatch "manifest include traverses a reparse point") {
+            throw "sync did not report the manifest include containment failure: $($result.Output)"
+        }
+        if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
+            throw "sync invoked repo before rejecting the manifest include junction"
+        }
+    }
+    finally {
+        Remove-MaterializationSandbox -Path $sandbox
+        if (Test-Path -LiteralPath $outside) {
+            Remove-Item -LiteralPath $outside -Recurse -Force
+        }
+    }
+}
+
 Test-Case "sync rejects a broken reparse-point conflict before invoking repo" {
     $sandbox = New-MaterializationSandbox
     $outside = Join-Path $temporaryRoot ("tsfg-materialization-broken-" + [guid]::NewGuid().ToString("N"))
