@@ -179,7 +179,7 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const selectedJob = job(source, name);
     assert.match(selectedJob, /sudo sysctl -q kernel\.apparmor_restrict_unprivileged_userns=0/, name);
-    assert.match(selectedJob, /sudo unshare --mount --net/, name);
+    assert.match(selectedJob, /sudo unshare --mount --net bash -ceu/, name);
     assert.doesNotMatch(selectedJob, /unshare --user/, name);
     assert.match(selectedJob, /mount -t sysfs -o ro,nosuid,nodev,noexec sysfs \/sys/, name);
     assert.match(selectedJob, /ip link set lo up/, name);
@@ -188,9 +188,17 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
 
   const build = job(source, "product-build");
   for (const command of ["verify-workspace", "build", "test", "package"]) {
-    assert.match(build, new RegExp(`offline "\\$workspace/tsfg/eng/tsfg-build" ${command}`));
+    assert.match(
+      build,
+      new RegExp(
+        `offline /usr/bin/env "TSFG_CACHE_DIR=\\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\\$TSFG_BOOTSTRAP_GIT_SHA256" "\\$workspace/tsfg/eng/tsfg-build" ${command}`,
+      ),
+    );
   }
-  assert.match(job(source, "reproducibility"), /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
+  assert.match(
+    job(source, "reproducibility"),
+    /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256" "\.ci\/product\/eng\/tsfg-build" repro-check/,
+  );
 });
 
 test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git", async () => {
@@ -199,7 +207,11 @@ test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git"
     const linuxJob = job(source, jobName);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
-    assert.match(linuxJob, /sudo unshare --mount --net/);
+    assert.match(linuxJob, /sudo unshare --mount --net bash -ceu/);
+    assert.match(
+      linuxJob,
+      /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256"/,
+    );
   }
 });
 
@@ -207,8 +219,8 @@ test("Linux candidate builds publish candidate-bound canaries from before and af
   const source = await workflow();
   const build = job(source, "product-build");
   const before = build.indexOf('network-canary.mjs" --out "$canary_root/before.json"');
-  const buildCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" build');
-  const packageCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" package');
+  const buildCommand = build.indexOf('"$workspace/tsfg/eng/tsfg-build" build');
+  const packageCommand = build.indexOf('"$workspace/tsfg/eng/tsfg-build" package');
   const after = build.indexOf('network-canary.mjs" --out "$canary_root/after.json"');
   assert.ok(before >= 0 && before < buildCommand, "the first real canary must run before build");
   assert.ok(after > packageCommand, "the second real canary must run after package");
