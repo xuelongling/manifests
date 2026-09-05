@@ -116,6 +116,12 @@ Test-Case "activation verifier does not depend on Get-FileHash module discovery"
     }
 }
 
+if (-not $IsWindows) {
+    Write-Host "SKIP repo.cmd materialization fixtures require Windows"
+    Write-Host "$passed passed, $failed failed"
+    exit $(if ($failed -eq 0) { 0 } else { 1 })
+}
+
 Test-Case "sync rejects copied Agent Activation Surface entries" {
     $sandbox = New-MaterializationSandbox
     try {
