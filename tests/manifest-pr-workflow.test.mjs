@@ -153,7 +153,7 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
   assert.match(compatibility, /--compatibility-candidate/);
   assert.match(compatibility, /compatibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/report\.json/);
   assert.match(compatibility, /retention-days: 90/);
-  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*unshare --user --map-users/);
+  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*unshare --user --map-root-user/);
   assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*deny-network\.cjs/);
 });
 
@@ -178,9 +178,9 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const selectedJob = job(source, name);
     assert.match(selectedJob, /sudo sysctl -q kernel\.apparmor_restrict_unprivileged_userns=0/, name);
-    assert.match(selectedJob, /unshare --user --map-users "0:\$\(id -u\):1" --map-groups "0:\$\(id -g\):1"/, name);
+    assert.match(selectedJob, /unshare --user --map-root-user --mount --net/, name);
     assert.doesNotMatch(selectedJob, /sudo(?:\s+--[^\s]+)*\s+unshare/, name);
-    assert.match(selectedJob, /--setgroups=deny --setuid 0 --setgid 0 --mount --net/, name);
+    assert.match(selectedJob, /--map-root-user --mount --net/, name);
     assert.match(selectedJob, /mount -t sysfs -o ro,nosuid,nodev,noexec sysfs \/sys/, name);
     assert.match(selectedJob, /ip link set lo up/, name);
     assert.match(selectedJob, /exec "\$@"/, name);

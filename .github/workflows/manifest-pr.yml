@@ -200,7 +200,7 @@ jobs:
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-root-user --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -298,7 +298,7 @@ jobs:
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-root-user --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -390,7 +390,7 @@ jobs:
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
           sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-root-user --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
@@ -460,7 +460,7 @@ jobs:
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+            unshare --user --map-root-user --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
