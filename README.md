@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MIT -->
+
 # tsfg Manifest Repository
 
 This repository versions Google `repo` orchestration metadata for tsfg. Git,
