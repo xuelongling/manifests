@@ -198,10 +198,13 @@ jobs:
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+              mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
+              interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
+              [ "$interfaces" = "lo" ]
+              exec "$@"
+            ' bash "$@"
           }
           offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -289,10 +292,13 @@ jobs:
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+              mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
+              interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
+              [ "$interfaces" = "lo" ]
+              exec "$@"
+            ' bash "$@"
           }
           offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
           offline "$(command -v node)" "$GITHUB_WORKSPACE/tools/network-canary.mjs" --out "$canary_root/before.json"
@@ -377,10 +383,13 @@ jobs:
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
           offline() {
-            sudo unshare --net --mount-proc bash -c '
+            sudo unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+              mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
+              interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
+              [ "$interfaces" = "lo" ]
+              exec "$@"
+            ' bash "$@"
           }
           offline "$(command -v node)" --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
             --compatibility-baseline "$input/baseline.json" \
@@ -443,10 +452,13 @@ jobs:
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
           offline() {
-            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --net --mount-proc bash -c '
+            sudo --preserve-env=TSFG_CACHE_DIR,TSFG_BOOTSTRAP_GIT,TSFG_BOOTSTRAP_GIT_SHA256 unshare --user --map-users "0:$(id -u):1" --map-groups "0:$(id -g):1" --setgroups=deny --setuid 0 --setgid 0 --mount --net bash -c '
+              mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
-              exec setpriv --reuid="$1" --regid="$2" --clear-groups -- "$3" "${@:4}"
-            ' bash "$(id -u)" "$(id -g)" "$@"
+              interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
+              [ "$interfaces" = "lo" ]
+              exec "$@"
+            ' bash "$@"
           }
           offline ".ci/product/eng/tsfg-build" repro-check --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" \
             --producer-a "$GITHUB_WORKSPACE/.ci/evidence/producers/${{ matrix.candidate.id }}/${{ matrix.target }}/${{ matrix.profile }}/a/package" \
