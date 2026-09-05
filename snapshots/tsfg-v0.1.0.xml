@@ -6,14 +6,14 @@
     name="tsfg.git"
     path="tsfg"
     remote="github-xuelongling"
-    revision="6dc7dbbb6ab6aff4b72da67e3fc254d63d2ddc9c"
+    revision="215d0a3c7507e23a0870c256bba784a8994313e4"
     upstream="refs/heads/main" />
 
   <project
     name=".agents.git"
     path=".agents"
     remote="github-xuelongling"
-    revision="5e1d260b7a62193e99aaa3d3662c9123795341d5"
+    revision="e29864164e66d2ac0ff3091ccd533682d12bf635"
     upstream="refs/heads/main">
     <linkfile src="AGENTS.md" dest="AGENTS.md" />
     <linkfile src="codex/config.toml" dest=".codex/config.toml" />
