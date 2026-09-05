@@ -73,6 +73,8 @@ function parseManifestElements(xml, label) {
   const stack = [];
   const token = /<[^>]*>|[^<]+/g;
   let cursor = 0;
+  let sawDeclaration = false;
+  let sawSpdxMarker = false;
   for (const match of xml.matchAll(token)) {
     if (match.index !== cursor) throw new ManifestCiError(`${label} is not well-formed XML`);
     cursor += match[0].length;
@@ -81,8 +83,20 @@ function parseManifestElements(xml, label) {
       if (value.trim() !== "") throw new ManifestCiError(`${label} contains unexpected XML text`);
       continue;
     }
-    if (/^<\?xml\s+version="1\.0"\s+encoding="UTF-8"\?>$/.test(value) && nodes.length === 0 && stack.length === 0) continue;
-    if (value === "<!-- SPDX-License-Identifier: MIT -->" && nodes.length === 0 && stack.length === 0) continue;
+    if (/^<\?xml\s+version="1\.0"\s+encoding="UTF-8"\?>$/.test(value)) {
+      if (match.index !== 0 || sawDeclaration || nodes.length !== 0 || stack.length !== 0) {
+        throw new ManifestCiError(`${label} contains a misplaced XML declaration`);
+      }
+      sawDeclaration = true;
+      continue;
+    }
+    if (value === "<!-- SPDX-License-Identifier: MIT -->") {
+      if (!sawDeclaration || sawSpdxMarker || nodes.length !== 0 || stack.length !== 0) {
+        throw new ManifestCiError(`${label} contains a misplaced SPDX marker`);
+      }
+      sawSpdxMarker = true;
+      continue;
+    }
     if (/^<\//.test(value)) {
       const closing = /^<\/([A-Za-z][A-Za-z0-9_-]*)\s*>$/.exec(value);
       if (!closing || stack.at(-1)?.name !== closing[1]) throw new ManifestCiError(`${label} has mismatched XML elements`);
@@ -102,7 +116,7 @@ function parseManifestElements(xml, label) {
     else stack.at(-1).children.push(node);
     if (!node.selfClosing) stack.push(node);
   }
-  if (cursor !== xml.length || stack.length !== 0 || nodes.length !== 1 || nodes[0].name !== "manifest") {
+  if (!sawDeclaration || cursor !== xml.length || stack.length !== 0 || nodes.length !== 1 || nodes[0].name !== "manifest") {
     throw new ManifestCiError(`${label} must contain one complete manifest root`);
   }
   return nodes[0];

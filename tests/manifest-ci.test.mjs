@@ -893,6 +893,10 @@ test("resolved manifests reject floating revisions, shallow clones, extra projec
       `revision="${product}" upstream="refs/heads/main" />`,
       `revision="${product}" upstream="refs/heads/main"><project name="hidden.git" path="hidden" remote="github-xuelongling" revision="${"3".repeat(40)}" upstream="refs/heads/main" /></project>`,
     )],
+    ["SPDX before declaration", valid.replace(
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!-- SPDX-License-Identifier: MIT -->\n<?xml version="1.0" encoding="UTF-8"?>',
+    )],
   ]);
   for (const [name, candidateManifest] of variants) {
     const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-invalid-"));
@@ -1115,7 +1119,10 @@ test("offline proof rejects resolved Candidate bytes detached from the manifest 
     const fixture = await writeOfflineProofFixture(sandbox);
     const identityRoot = path.join(fixture.candidateEvidence, "candidates", fixture.candidateId);
     const resolvedXmlPath = path.join(identityRoot, "resolved-manifest.xml");
-    const detachedXml = `\n${await readFile(resolvedXmlPath, "utf8")}`;
+    const detachedXml = (await readFile(resolvedXmlPath, "utf8")).replace(
+      '<?xml version="1.0" encoding="UTF-8"?>\n',
+      '<?xml version="1.0" encoding="UTF-8"?>\n\n',
+    );
     await writeFile(resolvedXmlPath, detachedXml);
     const summaryPath = path.join(identityRoot, "candidate-summary.json");
     const forgedSummary = JSON.parse(await readFile(summaryPath, "utf8"));
