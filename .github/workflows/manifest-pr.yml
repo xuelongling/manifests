@@ -191,6 +191,7 @@ jobs:
           git branch --force tsfg-ci-candidate "${{ matrix.candidate.manifestRevision }}"
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "tsfg-ci-candidate" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
+          git --git-dir "$workspace/.repo/manifests.git" config branch.default.merge "${{ matrix.candidate.manifestRevision }}"
           git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
           export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-workspace-${{ matrix.candidate.id }}/tool-cache"
           export TSFG_BOOTSTRAP_NODE="$(command -v node)"
@@ -198,14 +199,14 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-root-user --mount --net bash -c '
+            sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
+            sudo unshare --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
               [ "$interfaces" = "lo" ]
-              exec "$@"
+              exec setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "$@"
             ' bash "$@"
           }
           offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report ".ci/evidence/workspace/${{ matrix.candidate.id }}/report.json"
@@ -262,6 +263,7 @@ jobs:
           git branch --force tsfg-ci-candidate "${{ matrix.candidate.manifestRevision }}"
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" init -u "$manifest_source" -b "tsfg-ci-candidate" -m "${{ matrix.candidate.manifest }}" --repo-rev=v2.65 --worktree)
           (cd "$workspace" && python3 "$GITHUB_WORKSPACE/.ci/bootstrap/repo.py" sync --verify)
+          git --git-dir "$workspace/.repo/manifests.git" config branch.default.merge "${{ matrix.candidate.manifestRevision }}"
           git -C "$workspace/.repo/manifests" remote set-url origin "$TSFG_MANIFEST_URL"
       - name: Materialize the resolved candidate on Windows
         if: runner.os == 'Windows'
@@ -277,6 +279,8 @@ jobs:
           & "$env:GITHUB_WORKSPACE/.ci/bootstrap/repo.cmd" sync --verify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
+          git --git-dir "$workspace/.repo/manifests.git" config branch.default.merge '${{ matrix.candidate.manifestRevision }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C "$workspace/.repo/manifests" remote set-url origin $env:TSFG_MANIFEST_URL
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build, test, and package on Linux
@@ -296,14 +300,14 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           "$workspace/tsfg/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-root-user --mount --net bash -c '
+            sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
+            sudo unshare --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
               [ "$interfaces" = "lo" ]
-              exec "$@"
+              exec setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "$@"
             ' bash "$@"
           }
           offline "$workspace/tsfg/eng/tsfg-build" verify-workspace --workspace "$workspace" --manifest-url "$TSFG_MANIFEST_URL" --manifest-revision "${{ matrix.candidate.manifestRevision }}" --manifest "${{ matrix.candidate.manifest }}" --report "$root/workspace-report.json"
@@ -388,14 +392,14 @@ jobs:
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
-          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-root-user --mount --net bash -c '
+            sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
+            sudo unshare --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
               [ "$interfaces" = "lo" ]
-              exec "$@"
+              exec setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "$@"
             ' bash "$@"
           }
           offline "$(command -v node)" --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
@@ -458,14 +462,14 @@ jobs:
           export TSFG_BOOTSTRAP_GIT="$(command -v git)"
           export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           ".ci/product/eng/tsfg-build" prefetch --report "$root/prefetch-report.json"
-          sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
           offline() {
-            unshare --user --map-root-user --mount --net bash -c '
+            sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
+            sudo unshare --mount --net bash -c '
               mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys
               ip link set lo up
               interfaces=$(find /sys/class/net -mindepth 1 -maxdepth 1 -printf "%f\n" | sort)
               [ "$interfaces" = "lo" ]
-              exec "$@"
+              exec setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "$@"
             ' bash "$@"
           }
           offline ".ci/product/eng/tsfg-build" repro-check --target "${{ matrix.target }}" --profile "${{ matrix.profile }}" \

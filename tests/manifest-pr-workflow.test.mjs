@@ -110,6 +110,7 @@ test("every candidate is materialized and built by two isolated producers across
   assert.match(build, /git branch --force tsfg-ci-candidate "\$\{\{ matrix\.candidate\.manifestRevision \}\}"/);
   assert.match(build, /repo\.py" init -u "\$manifest_source" -b "tsfg-ci-candidate" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
   assert.match(build, /repo\.py" sync --verify/);
+  assert.match(build, /manifests\.git" config branch\.default\.merge "\$\{\{ matrix\.candidate\.manifestRevision \}\}"/);
   assert.match(build, /git -C "\$workspace\/\.repo\/manifests" remote set-url origin "\$TSFG_MANIFEST_URL"/);
   assert.doesNotMatch(build, /materialize-agent-workspace\.ts|materialized-identity\.json/);
   assert.match(build, /--manifest-revision ["']?\$\{\{ matrix\.candidate\.manifestRevision \}\}/);
@@ -153,7 +154,7 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
   assert.match(compatibility, /--compatibility-candidate/);
   assert.match(compatibility, /compatibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/report\.json/);
   assert.match(compatibility, /retention-days: 90/);
-  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*unshare --user --map-root-user/);
+  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*sudo unshare --mount --net/);
   assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*deny-network\.cjs/);
 });
 
@@ -178,13 +179,11 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const selectedJob = job(source, name);
     assert.match(selectedJob, /sudo sysctl -q kernel\.apparmor_restrict_unprivileged_userns=0/, name);
-    assert.match(selectedJob, /unshare --user --map-root-user --mount --net/, name);
-    assert.doesNotMatch(selectedJob, /sudo(?:\s+--[^\s]+)*\s+unshare/, name);
-    assert.match(selectedJob, /--map-root-user --mount --net/, name);
+    assert.match(selectedJob, /sudo unshare --mount --net/, name);
+    assert.doesNotMatch(selectedJob, /unshare --user/, name);
     assert.match(selectedJob, /mount -t sysfs -o ro,nosuid,nodev,noexec sysfs \/sys/, name);
     assert.match(selectedJob, /ip link set lo up/, name);
-    assert.match(selectedJob, /exec "\$@"/, name);
-    assert.doesNotMatch(selectedJob, /exec setpriv/, name);
+    assert.match(selectedJob, /exec setpriv --reuid "\$SUDO_UID" --regid "\$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "\$@"/, name);
   }
 
   const build = job(source, "product-build");
@@ -200,7 +199,7 @@ test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git"
     const linuxJob = job(source, jobName);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
-    assert.match(linuxJob, /unshare --user/);
+    assert.match(linuxJob, /sudo unshare --mount --net/);
   }
 });
 
