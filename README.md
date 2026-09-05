@@ -325,6 +325,12 @@ commit gate. `record-release-evidence` additionally downloads the exact
 Offline Proof in the provisional bundle. A claimed or locally fabricated proof
 therefore cannot replace ticket 17 execution evidence.
 
+Every downloaded provisional bundle, publication record, or rollback approval
+must itself come from a successful human-dispatched workflow on manifest main,
+and that source commit must remain an ancestor of the transaction's exact main
+commit. Candidate or failed-run artifacts are rejected before any transaction
+command executes.
+
 `protected-release-environment` must provide a narrowly scoped
 `TSFG_RELEASE_OWNER_TOKEN` secret that can create a release branch and pull
 request without bypassing branch protection. The default `GITHUB_TOKEN` stays

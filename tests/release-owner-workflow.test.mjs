@@ -46,6 +46,17 @@ test("recording Release Evidence consumes the real trusted Offline Proof unchang
   assert.match(source, /git ls-remote --tags https:\/\/github\.com\/xuelongling\/tsfg\.git/);
 });
 
+test("operation input artifacts come only from a successful trusted-main human run", async () => {
+  const source = await readFile(workflowPath, "utf8");
+  assert.match(source, /name: Authenticate the operation input artifact run/);
+  assert.match(source, /actions\/runs\/\$TSFG_INPUT_RUN_ID/);
+  assert.match(source, /run\.event !== "workflow_dispatch"/);
+  assert.match(source, /run\.head_branch !== "main"/);
+  assert.match(source, /run\.head_repository\?\.full_name !== "xuelongling\/manifests"/);
+  assert.match(source, /!human\(run\.actor\) \|\| !human\(run\.triggering_actor\)/);
+  assert.match(source, /input-run-sha\.txt[\s\S]*git merge-base --is-ancestor/);
+});
+
 test("Release Owner workflow prepares a PR and never pushes main, tags, or releases", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /git push origin "HEAD:refs\/heads\/\$branch"/);
