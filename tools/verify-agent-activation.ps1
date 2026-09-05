@@ -35,6 +35,25 @@ function Get-CanonicalPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
 }
 
+function Get-Sha256 {
+    param([Parameter(Mandatory)] [string] $Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($bytes)).Replace("-", "")
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 try {
     [xml] $manifest = Get-Content -LiteralPath $manifestPath -Raw
     $agentProject = $manifest.SelectSingleNode("/manifest/project[@path='.agents']")
@@ -115,8 +134,8 @@ foreach ($mapping in $mappings) {
     if (-not $resolvedTarget.Equals($source, [System.StringComparison]::OrdinalIgnoreCase)) {
         Stop-Activation "link target conflicts with the managed source: $($mapping.Destination) -> $targetText"
     }
-    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-    $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    $sourceHash = Get-Sha256 -Path $source
+    $destinationHash = Get-Sha256 -Path $destination
     if ($sourceHash -cne $destinationHash) {
         Stop-Activation "content does not match managed source: $($mapping.Destination)"
     }

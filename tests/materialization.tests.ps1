@@ -106,6 +106,16 @@ function Test-Case {
     }
 }
 
+Test-Case "activation verifier does not depend on Get-FileHash module discovery" {
+    $verifier = Get-Content -LiteralPath (Join-Path $repoRoot "tools/verify-agent-activation.ps1") -Raw
+    if ($verifier -match '\bGet-FileHash\b') {
+        throw "activation verifier still depends on Get-FileHash"
+    }
+    if ($verifier -notmatch '\[System\.Security\.Cryptography\.SHA256\]::Create\(\)') {
+        throw "activation verifier does not use an in-process SHA-256 implementation"
+    }
+}
+
 Test-Case "sync rejects copied Agent Activation Surface entries" {
     $sandbox = New-MaterializationSandbox
     try {
