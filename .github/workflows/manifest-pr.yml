@@ -386,12 +386,38 @@ jobs:
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           mkdir -p "$input" ".ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}"
           TSFG_COMPATIBILITY_INPUT="$input" node --input-type=module -e "import {writeFile} from 'node:fs/promises'; import {join} from 'node:path'; import {baselineSyntheticArtifact,candidateSyntheticArtifact} from './.ci/product/tests/r00/contract-compatibility-fixtures.mjs'; const baseline=baselineSyntheticArtifact(); const candidate=candidateSyntheticArtifact(); baseline.product.commitOid=process.env.TSFG_BASELINE_PRODUCT_REVISION; candidate.product.commitOid=process.env.TSFG_CANDIDATE_PRODUCT_REVISION; await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'baseline.json'),JSON.stringify(baseline)+'\n'); await writeFile(join(process.env.TSFG_COMPATIBILITY_INPUT,'candidate.json'),JSON.stringify(candidate)+'\n')"
+      - name: Prefetch the verified Linux compatibility runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}"
+          export TSFG_CACHE_DIR="$root/tool-cache"
+          export TSFG_BOOTSTRAP_NODE="$(command -v node)"
+          export TSFG_BOOTSTRAP_NODE_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_NODE" | cut -d ' ' -f 1)"
+          export TSFG_BOOTSTRAP_GIT="$(command -v git)"
+          export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
+          .ci/product/eng/tsfg-build prefetch --report "$root/prefetch-report.json"
+      - name: Prefetch the verified Windows compatibility runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}"
+          $env:TSFG_CACHE_DIR = "$root/tool-cache"
+          $env:TSFG_BOOTSTRAP_NODE = (Get-Command node.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_NODE_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_NODE -Algorithm SHA256).Hash.ToLowerInvariant()
+          $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
+          & .\.ci\product\eng\tsfg-build.cmd prefetch --report "$root/prefetch-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Execute baseline/baseline, candidate/baseline, baseline/candidate, and candidate/candidate on Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
           input="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           report="$GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
+          export TSFG_CACHE_DIR="$RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/tool-cache"
+          export TSFG_BOOTSTRAP_GIT="$(command -v git)"
+          export TSFG_BOOTSTRAP_GIT_SHA256="$(sha256sum "$TSFG_BOOTSTRAP_GIT" | cut -d ' ' -f 1)"
           offline() {
             sudo sysctl -q kernel.apparmor_restrict_unprivileged_userns=0
             sudo unshare --mount --net bash -ceu '
@@ -402,7 +428,7 @@ jobs:
               exec setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "$@"
             ' bash "$@"
           }
-          offline "$(command -v node)" --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target "${{ matrix.target }}" \
+          offline /usr/bin/env "TSFG_CACHE_DIR=$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=$TSFG_BOOTSTRAP_GIT_SHA256" "$GITHUB_WORKSPACE/.ci/product/eng/tsfg-build" test --target "${{ matrix.target }}" \
             --compatibility-baseline "$input/baseline.json" \
             --compatibility-candidate "$input/candidate.json" \
             --report "$report"
@@ -413,7 +439,10 @@ jobs:
         run: |
           $input = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/input"
           $report = "$env:GITHUB_WORKSPACE/.ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/report.json"
-          node --require ./.ci/product/tests/r00/deny-network.cjs .ci/product/eng/tsfg-build.mjs test --target '${{ matrix.target }}' --compatibility-baseline "$input/baseline.json" --compatibility-candidate "$input/candidate.json" --report $report
+          $env:TSFG_CACHE_DIR = "$env:RUNNER_TEMP/manifest-compatibility-${{ matrix.candidate.id }}/tool-cache"
+          $env:TSFG_BOOTSTRAP_GIT = (Get-Command git.exe -ErrorAction Stop).Source
+          $env:TSFG_BOOTSTRAP_GIT_SHA256 = (Get-FileHash -LiteralPath $env:TSFG_BOOTSTRAP_GIT -Algorithm SHA256).Hash.ToLowerInvariant()
+          & .\.ci\product\eng\tsfg-build.cmd test --target '${{ matrix.target }}' --compatibility-baseline "$input/baseline.json" --compatibility-candidate "$input/candidate.json" --report $report
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -Path "$input/*.json" -Destination ".ci/evidence/compatibility/${{ matrix.candidate.id }}/${{ matrix.target }}/" -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

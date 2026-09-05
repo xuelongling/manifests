@@ -149,13 +149,14 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
     "baseline/candidate",
     "candidate/candidate",
   ]) assert.match(compatibility, new RegExp(combination.replace("/", "\\/")));
-  assert.match(compatibility, /tsfg-build\.mjs test --target "\$\{\{ matrix\.target \}\}"/);
+  assert.match(compatibility, /tsfg-build(?:\.cmd)?["']? test --target ["']?\$\{\{ matrix\.target \}\}["']?/);
   assert.match(compatibility, /--compatibility-baseline/);
   assert.match(compatibility, /--compatibility-candidate/);
   assert.match(compatibility, /compatibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/report\.json/);
   assert.match(compatibility, /retention-days: 90/);
   assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*sudo unshare --mount --net/);
-  assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*deny-network\.cjs/);
+  assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*tsfg-build\.cmd test/);
+  assert.match(compatibility, /tsfg-build(?:\.cmd)? prefetch/);
 });
 
 test("reproducibility comparators are build-free and compare producer a with producer b", async () => {
@@ -196,6 +197,10 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
     );
   }
   assert.match(
+    job(source, "compatibility"),
+    /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256" "\$GITHUB_WORKSPACE\/\.ci\/product\/eng\/tsfg-build" test/,
+  );
+  assert.match(
     job(source, "reproducibility"),
     /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256" "\.ci\/product\/eng\/tsfg-build" repro-check/,
   );
@@ -203,7 +208,7 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
 
 test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git", async () => {
   const source = await workflow();
-  for (const jobName of ["workspace-verification", "product-build", "reproducibility"]) {
+  for (const jobName of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const linuxJob = job(source, jobName);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
     assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
