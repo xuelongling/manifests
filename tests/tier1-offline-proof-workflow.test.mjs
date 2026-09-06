@@ -62,7 +62,10 @@ test("trusted controller workflow delegates only to the protected out-of-band VM
   assert.match(source, /--out \.ci\/proof-evidence/);
   assert.match(source, /manifest-ci\.mjs candidate-proof-input/);
   assert.match(source, /--candidate-run \.ci\/candidate-run\.json/);
-  assert.match(source, /refs\/pull\/\$candidate_pr\/head:refs\/tsfg-proof\/candidate/);
+  assert.match(source, /shell: pwsh/);
+  assert.match(source, /TSFG_CANDIDATE_RUN_ID -cnotmatch '\^\[1-9\]\[0-9\]\*\$'/);
+  assert.match(source, /refs\/pull\/\$candidatePr\/head:refs\/tsfg-proof\/candidate/);
+  assert.match(source, /\$resolvedHead -cne \$candidateHead/);
   assert.match(source, /--repository \./);
   assert.match(source, /name: tier1-vm-controller-\$\{\{ inputs\.candidate_id \}\}/);
   for (const reference of [...source.matchAll(/^\s*- uses:\s*([^\s#]+)/gm)].map((match) => match[1])) {
