@@ -66,6 +66,7 @@ test("trusted controller workflow delegates only to the protected out-of-band VM
   assert.match(source, /TSFG_CANDIDATE_RUN_ID -cnotmatch '\^\[1-9\]\[0-9\]\*\$'/);
   assert.match(source, /commits\/\$\(\$candidateRun\.head_sha\)\/pulls/);
   assert.match(source, /\$candidateRun\.pull_requests = \$candidatePulls/);
+  assert.doesNotMatch(source, /\$candidatePulls = @\(/);
   assert.match(source, /refs\/pull\/\$candidatePr\/head:refs\/tsfg-proof\/candidate/);
   assert.match(source, /\$resolvedHead -cne \$candidateHead/);
   assert.match(source, /--repository \./);
