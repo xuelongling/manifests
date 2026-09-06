@@ -102,6 +102,16 @@ async function writeBundle(root, snapshotCommit) {
     productRevision,
     resolvedManifestDigest: `sha256:${candidateId}`,
   };
+  const releaseReports = ["linux-x86_64-gnu", "windows-x86_64-msvc"].map((target) => ({
+    candidateId,
+    licenseReport: {
+      path: `producers/${candidateId}/${target}/release/a/workspace-report.json`, sha256: byteDigest(`${target}/license-report`),
+    },
+    reproducibilityReport: {
+      path: `reproducibility/${candidateId}/${target}/release/report.json`, sha256: byteDigest(`${target}/reproducibility-report`),
+    },
+    target,
+  }));
   const files = {
     "offline-proof.json": {
       builds: [], candidate, candidateIds: [candidateId], candidateRun: {}, controllerRun: {},
@@ -119,13 +129,22 @@ async function writeBundle(root, snapshotCommit) {
     "release-materials.json": {
       artifacts: ["linux-x86_64-gnu", "windows-x86_64-msvc"].map((target) => ({
         archiveSha256: byteDigest(`${target}/archive`), artifactManifestSha256: byteDigest(`${target}/manifest`),
-        buildIdentityDigest: byteDigest(`${target}/identity`), checksumsSha256: byteDigest(`${target}/checksums`), target,
+        buildIdentityDigest: byteDigest(`${target}/identity`), checksumsSha256: byteDigest(`${target}/checksums`),
+        licenseReport: { ...releaseReports.find((entry) => entry.target === target).licenseReport },
+        reproducibilityReport: { ...releaseReports.find((entry) => entry.target === target).reproducibilityReport }, target,
       })),
+      candidateEvidence: {
+        artifact: `manifest-candidate-evidence-${snapshotCommit}`,
+        digest: byteDigest(`manifest-candidate/manifest-candidate-evidence-${snapshotCommit}`),
+        headSha: snapshotCommit,
+        runId: "303",
+        workflow: ".github/workflows/manifest-pr.yml",
+      },
       candidateId, releaseStatus: "non-stable", schemaVersion: "1", status: "fixed",
     },
     "verified-candidate.json": {
       candidateIds: [candidateId], evidenceDigest: byteDigest("candidate"), evidenceRetentionDays: "90",
-      promotionState: "Verified Candidate", requiredEvidence: {}, schemaVersion: "1",
+      promotionState: "Verified Candidate", releaseReports, requiredEvidence: {}, schemaVersion: "1",
     },
     "version-readiness.json": { candidateId, productVersion: version, schemaVersion: "1", status: "ready" },
   };
@@ -181,6 +200,20 @@ function requiredArtifacts(id, headSha, candidateId, runId) {
     "release-finalization": [`release-owner-finalize-release-${runId}`],
   }[id];
   return names.map((name) => ({ digest: byteDigest(`${id}/${name}`), name }));
+}
+
+function ruleset(id, name, target, include, ruleTypes, requiredStatusChecks = []) {
+  return {
+    bypassActors: [],
+    conditions: { exclude: [], include: [include] },
+    enforcement: "active",
+    id: String(id),
+    name,
+    rules: ruleTypes.map((type) => ({
+      requiredStatusChecks: type === "required_status_checks" ? requiredStatusChecks : [], type,
+    })),
+    target,
+  };
 }
 
 async function buildClosureFixture(mutateRecord = () => {}) {
@@ -242,17 +275,27 @@ async function buildClosureFixture(mutateRecord = () => {}) {
     const headSha = headByLane[id];
     return { artifacts: requiredArtifacts(id, headSha, bundle.candidateId, runId), headSha, id, repository: evidenceRepository, runId, workflow };
   });
+  const releaseInputs = evidence.find((entry) => entry.id === "release-inputs");
+  evidence.find((entry) => entry.id === "release-evidence").input = {
+    artifact: releaseInputs.artifacts[0].name,
+    digest: releaseInputs.artifacts[0].digest,
+    headSha: releaseInputs.headSha,
+    runId: releaseInputs.runId,
+    workflow: releaseInputs.workflow,
+  };
   const assets = [];
   const evidenceRecord = JSON.parse(await readFile(path.join(repository, "releases", "tsfg-v0.1.0", "evidence.json")));
   const releaseMaterials = new Map(evidenceRecord.releaseMaterials.artifacts.map((artifact) => [artifact.target, artifact]));
   const materialFields = {
     archive: "archiveSha256", "artifact-manifest": "artifactManifestSha256", checksums: "checksumsSha256",
+    "license-report": "licenseReport", "reproducibility-report": "reproducibilityReport",
   };
   for (const target of ["linux-x86_64-gnu", "windows-x86_64-msvc"]) {
     for (const kind of ["archive", "artifact-manifest", "checksums", "license-report", "reproducibility-report"]) {
       const name = `tsfg-${version}-${target}-${kind}.json`;
       const field = materialFields[kind];
-      assets.push({ digest: field ? releaseMaterials.get(target)[field] : byteDigest(name), kind, name, target });
+      const material = releaseMaterials.get(target)[field];
+      assets.push({ digest: typeof material === "string" ? material : material.sha256, kind, name, target });
     }
   }
   const record = {
@@ -292,6 +335,7 @@ async function buildClosureFixture(mutateRecord = () => {}) {
       headBranch: requirement?.[3] === "workflow_dispatch" ? "main" : "candidate",
       headSha: entry.headSha,
       repository: entry.repository,
+      reviews: [],
       runId: entry.runId,
       status: "completed",
       triggeringActor: owner,
@@ -300,6 +344,24 @@ async function buildClosureFixture(mutateRecord = () => {}) {
   });
   const apiEvidence = {
     githubRelease: { assets: record.release.assets.map(({ digest: assetDigest, name }) => ({ digest: assetDigest, name })), id: 101, tag: "tsfg-v0.1.0", url: record.release.githubRelease.url },
+    governance: {
+      releaseEnvironment: {
+        deploymentBranchPolicy: { customBranchPolicies: false, protectedBranches: true },
+        name: "protected-release-environment",
+        protectionRules: [],
+      },
+      rulesets: {
+        manifest: [ruleset(1, "manifest-main", "branch", "~DEFAULT_BRANCH", [
+          "deletion", "non_fast_forward", "pull_request", "required_linear_history", "required_status_checks",
+        ], ["Manifest Candidate Verdict"])],
+        product: [
+          ruleset(2, "product-main", "branch", "~DEFAULT_BRANCH", [
+            "deletion", "non_fast_forward", "pull_request", "required_linear_history", "required_status_checks",
+          ], ["Verified Candidate"]),
+          ruleset(3, "product-release-tags", "tag", "refs/tags/tsfg-v*", ["deletion", "non_fast_forward", "update"]),
+        ],
+      },
+    },
     repositories: {
       agent: { containsCandidate: true, mainOid: agentRevision },
       manifest: { containsCandidate: true, mainOid: closureCommit },
@@ -388,6 +450,79 @@ test("R00 closure rejects a published asset digest detached from immutable Relea
     const result = invoke(closureCommand(fixture), fixture.repository);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /committed Stable release state does not match/i);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("R00 closure rejects Release Evidence detached from the unique release-inputs run", async () => {
+  const fixture = await buildClosureFixture((record) => {
+    record.evidence.find((entry) => entry.id === "release-evidence").input.workflow = ".github/workflows/arbitrary.yml";
+  });
+  try {
+    const result = invoke(closureCommand(fixture), fixture.repository);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not bound to its unique provisional-input run/i);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("R00 closure rejects license and reproducibility assets detached from Candidate reports", async () => {
+  const fixture = await buildClosureFixture((record) => {
+    record.release.assets.find((asset) => asset.kind === "license-report").digest = byteDigest("detached license report");
+  });
+  try {
+    const result = invoke(closureCommand(fixture), fixture.repository);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /committed Stable release state does not match/i);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("R00 closure fails closed on missing main/tag ruleset and release-environment governance", async () => {
+  const fixture = await buildClosureFixture();
+  try {
+    for (const [name, mutate, pattern] of [
+      ["required-check", (api) => {
+        api.governance.rulesets.product[0].rules.find((rule) => rule.type === "required_status_checks").requiredStatusChecks = [];
+      }, /lacks required ruleset controls or checks/i],
+      ["main-force", (api) => {
+        api.governance.rulesets.product[0].rules = api.governance.rulesets.product[0].rules.filter((rule) => rule.type !== "non_fast_forward");
+      }, /lacks required ruleset controls or checks/i],
+      ["main-delete", (api) => {
+        api.governance.rulesets.manifest[0].rules = api.governance.rulesets.manifest[0].rules.filter((rule) => rule.type !== "deletion");
+      }, /lacks required ruleset controls or checks/i],
+      ["main-linear", (api) => {
+        api.governance.rulesets.manifest[0].rules = api.governance.rulesets.manifest[0].rules.filter((rule) => rule.type !== "required_linear_history");
+      }, /lacks required ruleset controls or checks/i],
+      ["tag-delete", (api) => {
+        api.governance.rulesets.product[1].rules = api.governance.rulesets.product[1].rules.filter((rule) => rule.type !== "deletion");
+      }, /lacks required ruleset controls or checks/i],
+      ["tag-update", (api) => {
+        api.governance.rulesets.product[1].rules = api.governance.rulesets.product[1].rules.filter((rule) => rule.type !== "update");
+      }, /lacks required ruleset controls or checks/i],
+      ["environment", (api) => { api.governance.releaseEnvironment.deploymentBranchPolicy.protectedBranches = false; }, /not restricted to protected branches/i],
+    ]) {
+      const api = structuredClone(fixture.apiEvidence);
+      mutate(api);
+      const apiPath = path.join(fixture.root, `${name}-governance.json`);
+      await writeJson(apiPath, api);
+      const result = invoke(closureCommand(fixture, apiPath, `${name}-report.json`), fixture.repository);
+      assert.equal(result.status, 1, `${name}: ${result.stderr}`);
+      assert.match(result.stderr, pattern);
+    }
+
+    const api = structuredClone(fixture.apiEvidence);
+    api.governance.releaseEnvironment.protectionRules = [{
+      preventSelfReview: true, reviewers: [{ login: "release-owner", type: "User" }], type: "required_reviewers",
+    }];
+    const apiPath = path.join(fixture.root, "missing-approval-governance.json");
+    await writeJson(apiPath, api);
+    const result = invoke(closureCommand(fixture, apiPath, "missing-approval-report.json"), fixture.repository);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /lacks its required human release environment approval/i);
   } finally {
     await rm(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

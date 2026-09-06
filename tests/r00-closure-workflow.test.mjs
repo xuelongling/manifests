@@ -26,7 +26,9 @@ test("R00 closure validates only a committed record on exact protected main", as
 test("R00 closure is API-backed, read-only, retained, and action-pinned", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /^permissions:\n  actions: read\n  contents: read$/m);
-  assert.match(source, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(source, /^    environment: protected-release-environment$/m);
+  assert.match(source, /test -n "\$TSFG_GOVERNANCE_TOKEN"/);
+  assert.match(source, /GH_TOKEN: \$\{\{ secrets\.TSFG_RELEASE_GOVERNANCE_TOKEN \}\}/);
   assert.match(source, /name: r00-closure-\$\{\{ inputs\.product_version \}\}-\$\{\{ inputs\.expected_main_sha \}\}/);
   assert.match(source, /retention-days: 90/);
   const references = [...source.matchAll(/uses:\s*([^\s#]+)/g)].map((match) => match[1]);

@@ -322,19 +322,25 @@ The workflow never pushes `main`, creates a tag, creates a GitHub Release, or
 merges its result. It writes exactly one operation commit to a run-specific
 branch and opens a pull request so protected-main required checks remain the
 commit gate. A successful run publishes a 90-day receipt binding the operation,
-run, actor, source main OID, transaction commit, branch, and resulting pull
-request; the closure record cites that exact artifact and API run. The
+run, actor, source main OID, transaction commit, branch, resulting pull request,
+and the exact input run, artifact name, artifact digest, and source-workflow OID
+when an input is consumed; the closure record repeats and cross-checks that
+binding against the cited API run. The
 `record-release-evidence` operation additionally downloads the exact
 `tier1-offline-proof-<candidate-id>` artifact from a successful trusted
 `tier1-offline-proof.yml` run and requires it to be byte-identical to the
 Offline Proof in the provisional bundle. A claimed or locally fabricated proof
 therefore cannot replace ticket 17 execution evidence.
 
-Every downloaded provisional bundle, publication record, or rollback approval
-must itself come from a successful human-dispatched workflow on manifest main,
-and that source commit must remain an ancestor of the transaction's exact main
-commit. Candidate or failed-run artifacts are rejected before any transaction
-command executes.
+The provisional bundle accepted by `record-release-evidence` can only be the
+single `release-provisional-inputs-<candidate-id>` artifact from the declared
+successful `.github/workflows/release-inputs.yml` run on Manifest main. Its API
+artifact digest and run OID are authenticated before download; another
+human-dispatched workflow cannot substitute for this producer. Publication and
+rollback inputs are also API-authenticated, and every source commit must remain
+an ancestor of the transaction's exact main commit. Candidate, duplicate,
+expired, digest-less, or failed-run artifacts are rejected before any
+transaction command executes.
 
 `protected-release-environment` must provide a narrowly scoped
 `TSFG_RELEASE_OWNER_TOKEN` secret that can create a release branch and pull
@@ -370,7 +376,11 @@ Create a provisional evidence directory containing exactly:
   product commit;
 - `release-materials.json` binding fixed, non-Stable archive, Artifact
   Manifest, external-checksum, and Build Identity digests for both Tier 1
-  targets; and
+  targets. Each target also records the canonical release-profile workspace
+  report (license source) and reproducibility report path and SHA-256 from the
+  Verified Candidate verdict. The same record binds the successful Manifest PR
+  run, head OID, workflow, `manifest-candidate-evidence-<OID>` artifact, and its
+  API digest; self-declared or detached report digests are rejected; and
 - `bundle.json`, whose sorted `entries` hash the six files above and whose
   `contentAddress` is the canonical JSON digest of
   `{ entries, schemaVersion: "1" }`. The bundle never hashes itself.
@@ -510,8 +520,27 @@ node tools/manifest-ci.mjs validate-r00-closure `
     --out .ci/r00-closure-report.json
 ```
 
+The closure job also enters `protected-release-environment` and requires a
+dedicated `TSFG_RELEASE_GOVERNANCE_TOKEN`. GitHub omits ruleset bypass actors
+from callers without ruleset write visibility, so this narrowly scoped,
+short-lived token must be able to read Actions, contents, and environments and
+must have repository Administration write visibility so the API returns the
+complete ruleset bypass configuration.
+The validator uses it only for GitHub REST `GET` requests; a missing token,
+hidden field, or denied endpoint fails closed. Do not reuse the branch/PR
+mutation token or expose either token to pull-request workflows.
+
 The validator reads current GitHub API state for all three repositories, every
-declared run and artifact, the Product tag and release assets. It also verifies
+declared run and artifact, the Product tag and release assets. It requires
+bypass-free active Product and Manifest `main` rulesets with pull requests,
+their canonical aggregate required check, linear history, and deletion/force-
+push restrictions. A Product release-tag ruleset must prohibit update, deletion,
+and non-fast-forward movement. It also reads
+`protected-release-environment`, requires deployment from protected branches,
+rejects invalid reviewer principals or rejected reviews, and, whenever human or
+team reviewers are configured, requires a matching human approval on every
+release-input, evidence, promotion, and finalization run (zero reviewers remains
+valid only for the documented single-human-maintainer stage). It also verifies
 the committed Release Evidence, publication metadata, Stable state and default
 manifest against the immutable snapshot and Candidate OIDs. Missing, failed,
 expired, duplicate, moved, non-ancestor, or digest-inconsistent evidence fails
