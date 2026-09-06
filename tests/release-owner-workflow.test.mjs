@@ -65,6 +65,18 @@ test("Release Owner workflow prepares a PR and never pushes main, tags, or relea
   assert.doesNotMatch(source, /\bgit tag\b|\/git\/refs\/tags|\/releases(?:"|'|\s)/);
 });
 
+test("Release Owner workflow publishes a run- and PR-bound transaction receipt", async () => {
+  const source = await readFile(workflowPath, "utf8");
+  assert.match(source, /--output "\$TSFG_CONTROL_ROOT\/pull-response\.json"/);
+  assert.match(source, /pull\.base\?\.ref !== "main"/);
+  assert.match(source, /pull\.head\?\.ref !== process\.env\.TSFG_BRANCH/);
+  assert.match(source, /baseCommit: process\.env\.GITHUB_SHA/);
+  assert.match(source, /transactionCommit: process\.env\.TSFG_TRANSACTION_COMMIT/);
+  assert.match(source, /name: release-owner-\$\{\{ inputs\.operation \}\}-\$\{\{ github\.run_id \}\}/);
+  assert.match(source, /path: \$\{\{ runner\.temp \}\}\/tsfg-release-owner\/receipt\.json/);
+  assert.match(source, /retention-days: 90/);
+});
+
 test("Release Owner workflow pins actions and keeps the default token read-only", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /^permissions:\n  actions: read\n  contents: read$/m);

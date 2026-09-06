@@ -9,7 +9,9 @@ import process from "node:process";
 const manifestRepositoryUrl = "https://github.com/xuelongling/manifests.git";
 const manifestRepositoryName = "xuelongling/manifests";
 const releaseEnvironment = "protected-release-environment";
+const releaseInputsWorkflowPath = ".github/workflows/release-inputs.yml";
 const releaseOwnerWorkflowPath = ".github/workflows/release-owner.yml";
+const r00ClosureWorkflowPath = ".github/workflows/r00-closure.yml";
 const bootstrapRevision = "d94f4e6bff9aa980b18b0df94e133559e4b61240";
 const completeOid = /^[0-9a-f]{40}$/;
 
@@ -196,6 +198,7 @@ function validateManifest(xml, label) {
 
 function canonicalize(value) {
   if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
@@ -310,7 +313,7 @@ function releaseFileTree(repository, revision, fileName) {
   const result = git(repository, ["ls-tree", "-r", revision, "--", "releases"]);
   const entries = new Map();
   for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
-    const match = /^(\d+)\s+blob\s+([0-9a-f]{40})\t(releases\/tsfg-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(evidence|publication|state)\.json)$/.exec(line.replaceAll("\\", "/"));
+    const match = /^(\d+)\s+blob\s+([0-9a-f]{40})\t(releases\/tsfg-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(closure|evidence|publication|state)\.json)$/.exec(line.replaceAll("\\", "/"));
     if (!match || `${match[5]}.json` !== fileName) continue;
     entries.set(match[4], { identity: `${match[1]} ${match[2]}`, path: match[3] });
   }
@@ -361,12 +364,13 @@ function validateReleaseHistory(repository, base, head) {
   const releaseTreePaths = git(repository, ["ls-tree", "-r", "--name-only", head, "--", "releases"])
     .stdout.split(/\r?\n/).filter(Boolean).map((entry) => entry.replaceAll("\\", "/"));
   for (const filePath of releaseTreePaths) {
-    if (!/^releases\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\/(?:evidence|publication|state)\.json$/.test(filePath)) {
+    if (!/^releases\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\/(?:closure|evidence|publication|state)\.json$/.test(filePath)) {
       throw new ManifestCiError(`release source has an undeclared path: ${filePath}`);
     }
   }
   const evidenceTrees = enforceImmutableReleaseFiles(repository, base, head, "evidence.json");
   const publicationTrees = enforceImmutableReleaseFiles(repository, base, head, "publication.json");
+  const closureTrees = enforceImmutableReleaseFiles(repository, base, head, "closure.json");
   const beforeStates = releaseFileTree(repository, base, "state.json");
   const afterStates = releaseFileTree(repository, head, "state.json");
   for (const version of beforeStates.keys()) {
@@ -423,6 +427,16 @@ function validateReleaseHistory(repository, base, head) {
         baseState?.state.promotionState !== "Stable" || baseDefault === undefined ||
         currentReleaseVersion(repository, base, baseDefault) !== version
       ) throw new ManifestCiError("publication metadata may only be finalized after the Stable commit point");
+    }
+  }
+
+  for (const [version, entry] of closureTrees.after) {
+    const closure = parseReleaseRecord(gitFile(repository, head, entry.path), entry.path);
+    validateR00ClosureRecordShape(closure, version, entry.path);
+    const state = releaseStateAt(repository, head, version, true)?.state;
+    const publication = gitFile(repository, head, releasePaths(version).publication, true);
+    if (state?.promotionState !== "Stable" || publication === undefined) {
+      throw new ManifestCiError(`${entry.path} requires an already-Stable release with publication metadata`);
     }
   }
 
@@ -581,6 +595,21 @@ async function atomicWrite(destination, bytes) {
   await renameWithRetry(temporary, destination);
 }
 
+async function atomicDirectory(destination, files) {
+  const resolved = path.resolve(destination);
+  if (await stat(resolved).catch(() => undefined)) throw new ManifestCiError(`output already exists: ${resolved}`);
+  const parent = path.dirname(resolved);
+  const temporary = path.join(parent, `.${path.basename(resolved)}.${randomUUID()}.tmp`);
+  await mkdir(temporary, { recursive: false });
+  try {
+    for (const [name, bytes] of files) await writeFile(path.join(temporary, name), bytes, { flag: "wx" });
+    await renameWithRetry(temporary, resolved);
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function tagPolicy(options) {
   const before = await readTagMap(required(options, "--before"), "before tag map");
   const after = await readTagMap(required(options, "--after"), "after tag map");
@@ -711,6 +740,7 @@ function releaseName(version) {
 function releasePaths(version) {
   const root = `releases/${releaseName(version)}`;
   return {
+    closure: `${root}/closure.json`,
     evidence: `${root}/evidence.json`,
     publication: `${root}/publication.json`,
     root,
@@ -994,6 +1024,289 @@ function validatePromotionBundle(input, version) {
   return { bundle, candidate, candidateId, offlineProof, ownerApproval, productTag, releaseMaterials, verifiedCandidate, versionReadiness };
 }
 
+function parseJsonBytes(bytes, label) {
+  return parseReleaseRecord(bytes.toString("utf8"), label);
+}
+
+function requireApiArtifact(response, expectedName, runId, label) {
+  if (!response || !Array.isArray(response.artifacts)) throw new ManifestCiError(`${label} artifact API response is invalid`);
+  const matches = response.artifacts.filter((artifact) => artifact?.name === expectedName);
+  if (
+    matches.length !== 1 || matches[0].expired === true ||
+    String(matches[0].workflow_run?.id) !== runId
+  ) throw new ManifestCiError(`${label} must be one unexpired artifact from the exact run`);
+}
+
+function requireApiWorkflowRun(run, expected, label) {
+  const actor = requireHumanActor(run?.actor, `${label} actor`);
+  const triggeringActor = requireHumanActor(run?.triggering_actor, `${label} triggering actor`);
+  if (
+    String(run?.id) !== expected.runId || run?.event !== expected.event ||
+    normalizedWorkflowPath(run?.path) !== expected.workflow || run?.repository?.full_name !== expected.repository ||
+    run?.head_repository?.full_name !== expected.repository || !completeOid.test(run?.head_sha) ||
+    (expected.headSha !== undefined && run.head_sha !== expected.headSha) ||
+    (expected.main && run.head_branch !== "main") ||
+    (expected.success && (run.status !== "completed" || run.conclusion !== "success"))
+  ) throw new ManifestCiError(`${label} is not the required API-backed workflow run`);
+  return { actor, triggeringActor };
+}
+
+function releaseInputReviews(reviews) {
+  if (!Array.isArray(reviews)) throw new ManifestCiError("release-input environment reviews must be an array");
+  const approved = [];
+  for (const review of reviews) {
+    const applies = Array.isArray(review?.environments) &&
+      review.environments.some((environment) => environment?.name === releaseEnvironment);
+    if (!applies) continue;
+    if (review.state === "rejected") throw new ManifestCiError("protected release environment was rejected");
+    if (review.state !== "approved") continue;
+    const reviewer = requireHumanActor(review.user, "protected release environment reviewer");
+    if (!approved.some((entry) => entry.login === reviewer.login)) approved.push(reviewer);
+  }
+  return approved.sort((left, right) => Buffer.from(left.login).compare(Buffer.from(right.login)));
+}
+
+function resolveTagRefs(source, tagName) {
+  let direct;
+  let peeled;
+  for (const line of source.split(/\r?\n/).filter(Boolean)) {
+    const match = /^([0-9a-f]{40})\s+(refs\/tags\/[^\s]+)$/.exec(line);
+    if (!match) throw new ManifestCiError("product tag refs contain malformed data");
+    if (match[2] === `refs/tags/${tagName}`) direct = match[1];
+    if (match[2] === `refs/tags/${tagName}^{}`) peeled = match[1];
+  }
+  return peeled ?? direct;
+}
+
+async function prepareReleaseBundle(options) {
+  const repository = path.resolve(required(options, "--repository"));
+  const version = requireVersion(required(options, "--version"));
+  const sha = requireOid(required(options, "--sha"), "release-input workflow commit");
+  const runId = required(options, "--run-id");
+  const actorLogin = required(options, "--actor");
+  const triggeringActorLogin = required(options, "--triggering-actor");
+  const run = await readJson(path.resolve(required(options, "--workflow-run")), "release-input workflow run");
+  const { actor, triggeringActor } = requireApiWorkflowRun(run, {
+    event: "workflow_dispatch", headSha: sha, main: true, repository: manifestRepositoryName,
+    runId, success: false, workflow: releaseInputsWorkflowPath,
+  }, "release-input workflow");
+  if (
+    actor.login !== actorLogin || triggeringActor.login !== triggeringActorLogin || actor.login !== triggeringActor.login ||
+    required(options, "--ref") !== "refs/heads/main" || git(repository, ["rev-parse", "HEAD"]).stdout.trim() !== sha ||
+    gitFile(repository, sha, releaseInputsWorkflowPath, true) === undefined
+  ) throw new ManifestCiError("release inputs must be staged by the same human on exact protected manifest main");
+  releaseInputReviews(await readJson(path.resolve(required(options, "--reviews")), "release-input environment reviews"));
+
+  const inputNames = new Map([
+    ["offline-proof.json", "--offline-proof"],
+    ["owner-approval.json", "--owner-approval"],
+    ["product-tag.json", "--product-tag"],
+    ["release-materials.json", "--release-materials"],
+    ["verified-candidate.json", "--verified-candidate"],
+    ["version-readiness.json", "--version-readiness"],
+  ]);
+  const files = new Map();
+  for (const [name, option] of inputNames) files.set(name, await readFile(path.resolve(required(options, option))));
+  const ownerDigest = required(options, "--owner-approval-sha256");
+  requireDigest(ownerDigest, "human-provided Release Owner approval digest");
+  if (byteDigest(files.get("owner-approval.json")) !== ownerDigest) {
+    throw new ManifestCiError("human-provided Release Owner approval bytes do not match the confirmed digest");
+  }
+  const structured = Object.fromEntries([...files].map(([name, bytes]) => [name, parseJsonBytes(bytes, name)]));
+  const entries = [...files].map(([name, bytes]) => ({ path: name, sha256: byteDigest(bytes) }))
+    .sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
+  const bundle = { contentAddress: digest({ entries, schemaVersion: "1" }), entries, schemaVersion: "1" };
+  const input = validatePromotionBundle({
+    bundle,
+    offlineProof: structured["offline-proof.json"],
+    ownerApproval: structured["owner-approval.json"],
+    productTag: structured["product-tag.json"],
+    releaseMaterials: structured["release-materials.json"],
+    verifiedCandidate: structured["verified-candidate.json"],
+    versionReadiness: structured["version-readiness.json"],
+  }, version);
+  if (required(options, "--candidate-id") !== input.candidateId) {
+    throw new ManifestCiError("workflow Candidate identity does not match the provisional release records");
+  }
+  if (input.ownerApproval.actor.login !== actor.login) {
+    throw new ManifestCiError("human-provided Release Owner approval must name the dispatching human");
+  }
+
+  const candidateRunId = required(options, "--candidate-run-id");
+  const candidateRun = await readJson(path.resolve(required(options, "--candidate-run")), "Verified Candidate workflow run");
+  requireApiWorkflowRun(candidateRun, {
+    event: "pull_request", headSha: input.candidate.manifestRevision, main: false, repository: manifestRepositoryName,
+    runId: candidateRunId, success: true, workflow: ".github/workflows/manifest-pr.yml",
+  }, "Verified Candidate workflow");
+  const candidateArtifact = required(options, "--candidate-artifact");
+  if (candidateArtifact !== `manifest-verdict-${input.candidate.manifestRevision}`) {
+    throw new ManifestCiError("Verified Candidate artifact name does not bind its workflow commit");
+  }
+  requireApiArtifact(
+    await readJson(path.resolve(required(options, "--candidate-artifacts")), "Verified Candidate artifacts"),
+    candidateArtifact, candidateRunId, "Verified Candidate verdict",
+  );
+
+  const offlineRunId = required(options, "--offline-proof-run-id");
+  const offlineRun = await readJson(path.resolve(required(options, "--offline-proof-run")), "Offline Proof workflow run");
+  requireApiWorkflowRun(offlineRun, {
+    event: "workflow_dispatch", main: true, repository: manifestRepositoryName,
+    runId: offlineRunId, success: true, workflow: ".github/workflows/tier1-offline-proof.yml",
+  }, "Offline Proof workflow");
+  if (String(input.offlineProof.candidateRun?.runId) !== candidateRunId) {
+    throw new ManifestCiError("Offline Proof does not bind the exact Verified Candidate run");
+  }
+  requireApiArtifact(
+    await readJson(path.resolve(required(options, "--offline-proof-artifacts")), "Offline Proof artifacts"),
+    `tier1-offline-proof-${input.candidateId}`, offlineRunId, "Offline Proof",
+  );
+  if (resolveTagRefs(await readFile(path.resolve(required(options, "--tag-refs")), "utf8"), input.productTag.name) !== input.productTag.targetRevision) {
+    throw new ManifestCiError("the immutable product tag does not resolve to the approved product revision");
+  }
+
+  await atomicDirectory(path.resolve(required(options, "--out")), new Map([
+    ...files,
+    ["bundle.json", jsonBytes(bundle)],
+  ]));
+}
+
+const closureEvidenceRequirements = new Map([
+  ["product-ci", { event: "pull_request", minimumArtifacts: 2, repository: "xuelongling/tsfg", workflow: ".github/workflows/product-pr.yml" }],
+  ["agent-ci", { event: "pull_request", minimumArtifacts: 0, repository: "xuelongling/.agents", workflow: ".github/workflows/agent-infrastructure-pr.yml" }],
+  ["manifest-candidate", { event: "pull_request", minimumArtifacts: 2, repository: manifestRepositoryName, workflow: ".github/workflows/manifest-pr.yml" }],
+  ["vm-controller", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: ".github/workflows/tier1-vm-controller.yml" }],
+  ["offline-proof", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: ".github/workflows/tier1-offline-proof.yml" }],
+  ["release-inputs", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: releaseInputsWorkflowPath }],
+  ["release-evidence", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: releaseOwnerWorkflowPath }],
+  ["stable-promotion", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: releaseOwnerWorkflowPath }],
+  ["release-finalization", { event: "workflow_dispatch", minimumArtifacts: 1, repository: manifestRepositoryName, workflow: releaseOwnerWorkflowPath }],
+]);
+
+const closureAcceptanceRequirements = new Map([
+  ["fresh-bootstrap", ["manifest-candidate"]],
+  ["repository-topology", ["product-ci", "agent-ci", "manifest-candidate"]],
+  ["workspace-verification", ["manifest-candidate"]],
+  ["offline-build-matrix", ["manifest-candidate"]],
+  ["empty-contract-set", ["product-ci", "manifest-candidate"]],
+  ["reproducibility", ["product-ci", "manifest-candidate"]],
+  ["tier1-offline-proof", ["vm-controller", "offline-proof"]],
+  ["source-license-provenance", ["product-ci", "agent-ci", "manifest-candidate"]],
+  ["required-ci", ["product-ci", "agent-ci", "manifest-candidate"]],
+  ["staged-release-evidence", ["release-inputs", "release-evidence"]],
+  ["stable-default", ["stable-promotion"]],
+  ["long-term-replay", ["offline-proof", "release-finalization"]],
+  ["no-scope-leakage", ["product-ci", "agent-ci", "manifest-candidate"]],
+]);
+
+const closureReleaseAssetKinds = ["archive", "artifact-manifest", "checksums", "license-report", "reproducibility-report"];
+
+function validateR00ClosureRecordShape(record, version, label = "R00 closure record") {
+  requireExactFields(record, ["acceptance", "candidate", "evidence", "productVersion", "release", "repositories", "schemaVersion"], label);
+  if (record.schemaVersion !== "1" || record.productVersion !== version) throw new ManifestCiError(`${label} has the wrong schema or Product Version`);
+  requireExactFields(record.candidate, ["agentRevision", "id", "manifestRevision", "productRevision", "snapshot"], `${label} candidate`);
+  if (!/^[0-9a-f]{64}$/.test(record.candidate.id) || record.candidate.snapshot !== snapshotPath(version)) {
+    throw new ManifestCiError(`${label} does not bind the exact versioned Candidate`);
+  }
+  for (const [field, name] of [["agentRevision", "agent"], ["manifestRevision", "manifest"], ["productRevision", "product"]]) {
+    requireOid(record.candidate[field], `${label} ${name} revision`);
+  }
+  requireExactFields(record.repositories, ["agent", "manifest", "product"], `${label} repositories`);
+  requireExactFields(record.repositories.agent, ["mainOid", "repository"], `${label} Agent repository`);
+  requireExactFields(record.repositories.manifest, ["repository", "stableOid"], `${label} Manifest repository`);
+  requireExactFields(record.repositories.product, ["postStableMainOid", "repository"], `${label} Product repository`);
+  if (
+    record.repositories.agent.repository !== "xuelongling/.agents" ||
+    record.repositories.manifest.repository !== manifestRepositoryName ||
+    record.repositories.product.repository !== "xuelongling/tsfg"
+  ) throw new ManifestCiError(`${label} contains a non-canonical repository`);
+  requireOid(record.repositories.agent.mainOid, `${label} Agent main OID`);
+  requireOid(record.repositories.manifest.stableOid, `${label} Stable manifest OID`);
+  requireOid(record.repositories.product.postStableMainOid, `${label} post-Stable Product main OID`);
+
+  if (!Array.isArray(record.evidence) || record.evidence.length !== closureEvidenceRequirements.size) {
+    throw new ManifestCiError(`${label} must contain every required workflow evidence lane exactly once`);
+  }
+  const evidenceIds = new Set();
+  for (const entry of record.evidence) {
+    requireExactFields(entry, ["artifacts", "headSha", "id", "repository", "runId", "workflow"], `${label} workflow evidence`);
+    const requirement = closureEvidenceRequirements.get(entry.id);
+    if (!requirement || evidenceIds.has(entry.id)) throw new ManifestCiError(`${label} has an unknown or duplicate workflow evidence lane`);
+    evidenceIds.add(entry.id);
+    if (entry.repository !== requirement.repository || entry.workflow !== requirement.workflow || !/^[1-9]\d*$/.test(entry.runId)) {
+      throw new ManifestCiError(`${label} workflow evidence is not canonical for ${entry.id}`);
+    }
+    requireOid(entry.headSha, `${label} ${entry.id} head OID`);
+    if (!Array.isArray(entry.artifacts) || entry.artifacts.length < requirement.minimumArtifacts) {
+      throw new ManifestCiError(`${label} ${entry.id} lacks required durable artifact bindings`);
+    }
+    const names = new Set();
+    for (const artifact of entry.artifacts) {
+      requireExactFields(artifact, ["digest", "name"], `${label} ${entry.id} artifact`);
+      if (!artifact.name || names.has(artifact.name)) throw new ManifestCiError(`${label} ${entry.id} has an invalid artifact name`);
+      names.add(artifact.name);
+      requireDigest(artifact.digest, `${label} ${entry.id} artifact digest`);
+    }
+  }
+  for (const [id, revision] of [
+    ["product-ci", record.candidate.productRevision],
+    ["agent-ci", record.candidate.agentRevision],
+    ["manifest-candidate", record.candidate.manifestRevision],
+  ]) {
+    if (record.evidence.find((entry) => entry.id === id)?.headSha !== revision) {
+      throw new ManifestCiError(`${label} ${id} does not bind its Candidate repository OID`);
+    }
+  }
+  if (!Array.isArray(record.acceptance) || record.acceptance.length !== closureAcceptanceRequirements.size) {
+    throw new ManifestCiError(`${label} must link every R00 acceptance condition exactly once`);
+  }
+  const acceptanceIds = new Set();
+  for (const entry of record.acceptance) {
+    requireExactFields(entry, ["evidence", "id"], `${label} acceptance link`);
+    const requiredEvidence = closureAcceptanceRequirements.get(entry.id);
+    if (!requiredEvidence || acceptanceIds.has(entry.id)) throw new ManifestCiError(`${label} has an unknown or duplicate acceptance condition`);
+    acceptanceIds.add(entry.id);
+    if (canonicalize(entry.evidence) !== canonicalize(requiredEvidence)) {
+      throw new ManifestCiError(`${label} ${entry.id} does not link its complete required evidence`);
+    }
+  }
+
+  requireExactFields(record.release, ["assets", "githubRelease", "tag"], `${label} release`);
+  requireExactFields(record.release.githubRelease, ["id", "repository", "tag", "url"], `${label} GitHub Release`);
+  requireExactFields(record.release.tag, ["name", "repository", "targetRevision"], `${label} product tag`);
+  if (
+    !Number.isSafeInteger(record.release.githubRelease.id) || record.release.githubRelease.id < 1 ||
+    record.release.githubRelease.repository !== "xuelongling/tsfg" || record.release.githubRelease.tag !== releaseName(version) ||
+    !/^https:\/\/github\.com\/xuelongling\/tsfg\/releases\//.test(record.release.githubRelease.url) ||
+    record.release.tag.name !== releaseName(version) || record.release.tag.repository !== "xuelongling/tsfg" ||
+    record.release.tag.targetRevision !== record.candidate.productRevision
+  ) throw new ManifestCiError(`${label} does not bind the immutable Product tag and GitHub Release`);
+  const expectedAssets = [];
+  for (const target of ["linux-x86_64-gnu", "windows-x86_64-msvc"]) {
+    for (const kind of closureReleaseAssetKinds) expectedAssets.push(`${target}/${kind}`);
+  }
+  if (!Array.isArray(record.release.assets) || record.release.assets.length !== expectedAssets.length) {
+    throw new ManifestCiError(`${label} lacks the complete long-term Stable release asset set`);
+  }
+  const actualAssets = [];
+  const assetNames = new Set();
+  for (const asset of record.release.assets) {
+    requireExactFields(asset, ["digest", "kind", "name", "target"], `${label} Stable release asset`);
+    requireDigest(asset.digest, `${label} Stable release asset digest`);
+    if (
+      !asset.name || assetNames.has(asset.name) || !closureReleaseAssetKinds.includes(asset.kind) ||
+      !["linux-x86_64-gnu", "windows-x86_64-msvc"].includes(asset.target)
+    ) {
+      throw new ManifestCiError(`${label} contains an invalid Stable release asset`);
+    }
+    assetNames.add(asset.name);
+    actualAssets.push(`${asset.target}/${asset.kind}`);
+  }
+  actualAssets.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  expectedAssets.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  if (canonicalize(actualAssets) !== canonicalize(expectedAssets)) throw new ManifestCiError(`${label} Stable release assets are incomplete or duplicated`);
+  return record;
+}
+
 function parseReleaseRecord(source, label) {
   let value;
   try {
@@ -1002,6 +1315,253 @@ function parseReleaseRecord(source, label) {
     throw new ManifestCiError(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
   return value;
+}
+
+async function githubApi(pathName, token) {
+  const response = await fetch(`https://api.github.com/${pathName}`, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!response.ok) throw new ManifestCiError(`GitHub API ${pathName} failed with HTTP ${response.status}`);
+  return response.json();
+}
+
+async function repositoryContains(repository, candidate, main, token) {
+  if (candidate === main) return true;
+  const comparison = await githubApi(`repos/${repository}/compare/${candidate}...${main}`, token);
+  return ["ahead", "identical"].includes(comparison.status);
+}
+
+async function collectClosureApiEvidence(record) {
+  const token = process.env.GH_TOKEN;
+  if (!token) throw new ManifestCiError("GH_TOKEN is required for API-backed R00 closure validation");
+  const repositories = {};
+  for (const [key, repository, candidate] of [
+    ["product", "xuelongling/tsfg", record.candidate.productRevision],
+    ["agent", "xuelongling/.agents", record.candidate.agentRevision],
+    ["manifest", manifestRepositoryName, record.repositories.manifest.stableOid],
+  ]) {
+    const commit = await githubApi(`repos/${repository}/commits/main`, token);
+    repositories[key] = {
+      containsCandidate: await repositoryContains(repository, candidate, commit.sha, token),
+      mainOid: commit.sha,
+    };
+  }
+  const versionSource = await githubApi("repos/xuelongling/tsfg/contents/version.json?ref=main", token);
+  let productVersion;
+  try {
+    productVersion = JSON.parse(Buffer.from(versionSource.content, "base64").toString("utf8")).version;
+  } catch {
+    throw new ManifestCiError("Product main version.json is not valid API-backed JSON");
+  }
+  repositories.product.productVersion = productVersion;
+
+  const tagRef = await githubApi(`repos/xuelongling/tsfg/git/ref/tags/${record.release.tag.name}`, token);
+  let tagTarget = tagRef.object?.sha;
+  if (tagRef.object?.type === "tag") {
+    const tagObject = await githubApi(`repos/xuelongling/tsfg/git/tags/${tagTarget}`, token);
+    tagTarget = tagObject.object?.sha;
+  }
+  const githubRelease = await githubApi(`repos/xuelongling/tsfg/releases/tags/${record.release.tag.name}`, token);
+
+  const runs = [];
+  for (const entry of record.evidence) {
+    const run = await githubApi(`repos/${entry.repository}/actions/runs/${entry.runId}`, token);
+    const artifacts = await githubApi(`repos/${entry.repository}/actions/runs/${entry.runId}/artifacts?per_page=100`, token);
+    runs.push({
+      actor: run.actor,
+      artifacts: (artifacts.artifacts ?? []).map((artifact) => ({
+        digest: artifact.digest,
+        expired: artifact.expired,
+        name: artifact.name,
+      })),
+      conclusion: run.conclusion,
+      event: run.event,
+      headBranch: run.head_branch,
+      headSha: run.head_sha,
+      repository: run.repository?.full_name,
+      runId: String(run.id),
+      status: run.status,
+      triggeringActor: run.triggering_actor,
+      workflow: normalizedWorkflowPath(run.path),
+    });
+  }
+  return {
+    githubRelease: {
+      assets: (githubRelease.assets ?? []).map((asset) => ({ digest: asset.digest, name: asset.name })),
+      id: githubRelease.id,
+      tag: githubRelease.tag_name,
+      url: githubRelease.html_url,
+    },
+    repositories,
+    runs,
+    schemaVersion: "1",
+    tag: { name: record.release.tag.name, targetRevision: tagTarget },
+  };
+}
+
+function requireArtifactNames(entry, names, label) {
+  const actual = new Set(entry.artifacts.map((artifact) => artifact.name));
+  for (const name of names) if (!actual.has(name)) throw new ManifestCiError(`${label} lacks ${name}`);
+}
+
+function validateClosureApiEvidence(record, apiEvidence) {
+  requireExactFields(apiEvidence, ["githubRelease", "repositories", "runs", "schemaVersion", "tag"], "R00 closure API evidence");
+  if (apiEvidence.schemaVersion !== "1") throw new ManifestCiError("R00 closure API evidence has the wrong schema");
+  requireExactFields(apiEvidence.repositories, ["agent", "manifest", "product"], "R00 closure API repositories");
+  for (const key of ["agent", "manifest"]) {
+    requireExactFields(apiEvidence.repositories[key], ["containsCandidate", "mainOid"], `R00 closure API ${key} repository`);
+  }
+  requireExactFields(apiEvidence.repositories.product, ["containsCandidate", "mainOid", "productVersion"], "R00 closure API Product repository");
+  if (
+    apiEvidence.repositories.product.mainOid !== record.repositories.product.postStableMainOid ||
+    apiEvidence.repositories.product.productVersion !== "0.2.0-dev.0" || !apiEvidence.repositories.product.containsCandidate ||
+    apiEvidence.repositories.agent.mainOid !== record.repositories.agent.mainOid || !apiEvidence.repositories.agent.containsCandidate ||
+    !apiEvidence.repositories.manifest.containsCandidate
+  ) throw new ManifestCiError("canonical repository main state does not contain the closed R00 integration");
+
+  requireExactFields(apiEvidence.tag, ["name", "targetRevision"], "R00 closure API product tag");
+  if (apiEvidence.tag.name !== record.release.tag.name || apiEvidence.tag.targetRevision !== record.release.tag.targetRevision) {
+    throw new ManifestCiError("API-backed Product tag does not match the closure record");
+  }
+  requireExactFields(apiEvidence.githubRelease, ["assets", "id", "tag", "url"], "R00 closure API GitHub Release");
+  if (
+    apiEvidence.githubRelease.id !== record.release.githubRelease.id || apiEvidence.githubRelease.tag !== record.release.githubRelease.tag ||
+    apiEvidence.githubRelease.url !== record.release.githubRelease.url || !Array.isArray(apiEvidence.githubRelease.assets)
+  ) throw new ManifestCiError("API-backed GitHub Release does not match the closure record");
+  for (const asset of record.release.assets) {
+    const matches = apiEvidence.githubRelease.assets.filter((actual) => actual?.name === asset.name && actual?.digest === asset.digest);
+    if (matches.length !== 1) throw new ManifestCiError(`GitHub Release lacks exact long-term asset ${asset.name}`);
+  }
+
+  if (!Array.isArray(apiEvidence.runs) || apiEvidence.runs.length !== record.evidence.length) {
+    throw new ManifestCiError("R00 closure API evidence lacks required workflow runs");
+  }
+  for (const entry of record.evidence) {
+    const requirement = closureEvidenceRequirements.get(entry.id);
+    const matches = apiEvidence.runs.filter((run) => run?.repository === entry.repository && run?.runId === entry.runId);
+    if (matches.length !== 1) throw new ManifestCiError(`API evidence lacks exact ${entry.id} workflow run`);
+    const run = matches[0];
+    if (
+      run.workflow !== entry.workflow || run.event !== requirement.event || run.headSha !== entry.headSha ||
+      run.status !== "completed" || run.conclusion !== "success" ||
+      (requirement.event === "workflow_dispatch" && run.headBranch !== "main")
+    ) throw new ManifestCiError(`${entry.id} workflow run did not complete from its required source`);
+    if (requirement.event === "workflow_dispatch") {
+      requireHumanActor(run.actor, `${entry.id} workflow actor`);
+      requireHumanActor(run.triggeringActor, `${entry.id} workflow triggering actor`);
+    }
+    if (!Array.isArray(run.artifacts)) throw new ManifestCiError(`${entry.id} workflow artifact response is invalid`);
+    for (const artifact of entry.artifacts) {
+      const artifactMatches = run.artifacts.filter((actual) =>
+        actual?.name === artifact.name && actual?.digest === artifact.digest && actual?.expired === false);
+      if (artifactMatches.length !== 1) throw new ManifestCiError(`${entry.id} lacks exact unexpired artifact ${artifact.name}`);
+    }
+    if (entry.id === "product-ci") requireArtifactNames(entry, [`verified-candidate-${entry.headSha}`, `candidate-evidence-${entry.headSha}`], "Product CI");
+    if (entry.id === "manifest-candidate") requireArtifactNames(entry, [`manifest-verdict-${entry.headSha}`, `manifest-candidate-evidence-${entry.headSha}`], "Manifest Candidate");
+    if (entry.id === "vm-controller") requireArtifactNames(entry, [`tier1-vm-controller-${record.candidate.id}`], "VM controller");
+    if (entry.id === "offline-proof") requireArtifactNames(entry, [`tier1-offline-proof-${record.candidate.id}`], "Offline Proof");
+    if (entry.id === "release-inputs") requireArtifactNames(entry, [`release-provisional-inputs-${record.candidate.id}`], "release inputs");
+    if (["release-evidence", "stable-promotion", "release-finalization"].includes(entry.id)) {
+      const operation = { "release-evidence": "record-release-evidence", "stable-promotion": "promote-stable", "release-finalization": "finalize-release" }[entry.id];
+      requireArtifactNames(entry, [`release-owner-${operation}-${entry.runId}`], entry.id);
+    }
+  }
+}
+
+async function validateR00Closure(options) {
+  const repository = path.resolve(required(options, "--repository"));
+  const recordPath = required(options, "--record").replaceAll("\\", "/");
+  const match = /^releases\/tsfg-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/closure\.json$/.exec(recordPath);
+  if (!match) throw new ManifestCiError("R00 closure record must use its versioned release path");
+  const version = requireVersion(match[1]);
+  requireCleanRepository(repository);
+  const head = git(repository, ["rev-parse", "HEAD"]).stdout.trim();
+  const validationSha = requireOid(required(options, "--validation-sha"), "closure validation commit");
+  const validationRunId = required(options, "--validation-run-id");
+  if (head !== validationSha || !/^[1-9]\d*$/.test(validationRunId)) {
+    throw new ManifestCiError("closure validation must execute the exact protected main commit and API run");
+  }
+  const recordBytes = await readFile(path.join(repository, ...recordPath.split("/")));
+  if (gitFile(repository, head, recordPath, true) !== recordBytes.toString("utf8")) {
+    throw new ManifestCiError("R00 closure record must be committed in the exact validation revision");
+  }
+  const record = validateR00ClosureRecordShape(parseJsonBytes(recordBytes, recordPath), version, recordPath);
+  if (git(repository, ["merge-base", "--is-ancestor", record.repositories.manifest.stableOid, head], true).status !== 0) {
+    throw new ManifestCiError("Stable manifest commit is not an ancestor of the closure record");
+  }
+  const paths = releasePaths(version);
+  const snapshot = gitFile(repository, head, snapshotPath(version), true);
+  const stableDefault = gitFile(repository, record.repositories.manifest.stableOid, "default.xml", true);
+  const currentDefault = gitFile(repository, head, "default.xml", true);
+  if (snapshot === undefined || stableDefault !== snapshot || currentDefault !== snapshot) {
+    throw new ManifestCiError("Stable default does not equal the immutable versioned snapshot");
+  }
+  const snapshotProjects = validateManifest(snapshot, snapshotPath(version));
+  if (
+    snapshotProjects.find((entry) => entry.name === "tsfg.git")?.revision !== record.candidate.productRevision ||
+    snapshotProjects.find((entry) => entry.name === ".agents.git")?.revision !== record.candidate.agentRevision
+  ) throw new ManifestCiError("closure Candidate OIDs do not match the Stable snapshot");
+  const evidenceSource = gitFile(repository, head, paths.evidence, true);
+  const stateSource = gitFile(repository, head, paths.state, true);
+  const publicationSource = gitFile(repository, head, paths.publication, true);
+  if (evidenceSource === undefined || stateSource === undefined || publicationSource === undefined) {
+    throw new ManifestCiError("closure requires committed Release Evidence, Stable state, and publication metadata");
+  }
+  const evidence = parseReleaseRecord(evidenceSource, paths.evidence);
+  const state = parseReleaseRecord(stateSource, paths.state);
+  const publication = parseReleaseRecord(publicationSource, paths.publication);
+  validateReleaseEvidence(evidence, version, paths.evidence);
+  validateReleaseState(state, version, paths.state);
+  validatePublication(publication, version, paths.publication);
+  const stableStateSource = gitFile(repository, record.repositories.manifest.stableOid, paths.state, true);
+  const stableState = stableStateSource && parseReleaseRecord(stableStateSource, `${paths.state} at Stable commit`);
+  const publishedRelease = publication.publications.find((entry) =>
+    entry.kind === "github-release" && entry.url === record.release.githubRelease.url);
+  const releaseMaterialDigests = new Map(evidence.releaseMaterials.artifacts.map((artifact) => [artifact.target, artifact]));
+  const materialFields = new Map([
+    ["archive", "archiveSha256"],
+    ["artifact-manifest", "artifactManifestSha256"],
+    ["checksums", "checksumsSha256"],
+  ]);
+  const mismatchedReleaseAsset = record.release.assets.find((asset) => {
+    const field = materialFields.get(asset.kind);
+    return field && releaseMaterialDigests.get(asset.target)?.[field] !== asset.digest;
+  });
+  if (
+    state.promotionState !== "Stable" || stableState?.promotionState !== "Stable" ||
+    state.evidence.sha256 !== byteDigest(evidenceSource) || publication.evidenceSha256 !== byteDigest(evidenceSource) ||
+    !publishedRelease || mismatchedReleaseAsset ||
+    evidence.candidate.id !== record.candidate.id || evidence.candidate.manifestRevision !== record.candidate.manifestRevision ||
+    evidence.candidate.productRevision !== record.candidate.productRevision || evidence.candidate.agentRevision !== record.candidate.agentRevision
+  ) throw new ManifestCiError("committed Stable release state does not match the closure record");
+  for (const entry of record.evidence.filter((item) =>
+    item.repository === manifestRepositoryName && closureEvidenceRequirements.get(item.id)?.event === "workflow_dispatch")) {
+    if (git(repository, ["merge-base", "--is-ancestor", entry.headSha, head], true).status !== 0) {
+      throw new ManifestCiError(`${entry.id} did not run from protected Manifest main history`);
+    }
+  }
+
+  const apiEvidence = options.get("--api-evidence")
+    ? await readJson(path.resolve(options.get("--api-evidence")), "R00 closure API evidence")
+    : await collectClosureApiEvidence(record);
+  if (apiEvidence.repositories?.manifest?.mainOid !== head) {
+    throw new ManifestCiError("API-backed Manifest main does not equal the closure validation commit");
+  }
+  validateClosureApiEvidence(record, apiEvidence);
+  await atomicWrite(path.resolve(required(options, "--out")), jsonBytes({
+    apiEvidenceDigest: digest(apiEvidence),
+    candidateId: record.candidate.id,
+    closure: "R00",
+    closureRecordSha256: byteDigest(recordBytes),
+    productVersion: version,
+    schemaVersion: "1",
+    status: "passed",
+    validation: { commit: head, runId: validationRunId, workflow: r00ClosureWorkflowPath },
+  }));
 }
 
 function validateReleaseEvidence(evidence, version, label) {
@@ -2161,6 +2721,14 @@ async function main() {
       "--repository", "--run", "--reviews", "--run-id", "--operation", "--actor", "--triggering-actor",
       "--ref", "--sha", "--out",
     ])));
+  } else if (command === "prepare-release-bundle") {
+    await prepareReleaseBundle(parseOptions(arguments_, new Set([
+      "--repository", "--version", "--verified-candidate", "--offline-proof", "--owner-approval",
+      "--owner-approval-sha256", "--version-readiness", "--product-tag", "--release-materials",
+      "--workflow-run", "--reviews", "--run-id", "--actor", "--triggering-actor", "--ref", "--sha", "--candidate-id",
+      "--candidate-run", "--candidate-run-id", "--candidate-artifacts", "--candidate-artifact",
+      "--offline-proof-run", "--offline-proof-run-id", "--offline-proof-artifacts", "--tag-refs", "--out",
+    ])));
   } else if (command === "record-release-evidence") {
     await recordReleaseEvidence(parseOptions(arguments_, new Set(["--repository", "--version", "--bundle", "--authorization"])));
   } else if (command === "promote-stable") {
@@ -2169,6 +2737,10 @@ async function main() {
     await finalizeRelease(parseOptions(arguments_, new Set(["--repository", "--version", "--metadata", "--authorization"])));
   } else if (command === "rollback") {
     await rollbackRelease(parseOptions(arguments_, new Set(["--repository", "--approval", "--authorization"])));
+  } else if (command === "validate-r00-closure") {
+    await validateR00Closure(parseOptions(arguments_, new Set([
+      "--repository", "--record", "--api-evidence", "--validation-run-id", "--validation-sha", "--out",
+    ])));
   } else {
     throw new ManifestCiError(`unsupported command: ${command ?? "<missing>"}`);
   }
