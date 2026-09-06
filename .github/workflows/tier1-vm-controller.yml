@@ -71,15 +71,28 @@ jobs:
             -Headers $headers `
             -OutFile .ci/candidate-run.json
           $candidateRun = Get-Content -LiteralPath .ci/candidate-run.json -Raw | ConvertFrom-Json
-          if (
-            @($candidateRun.pull_requests).Count -ne 1 -or
-            $candidateRun.pull_requests[0].number -notmatch '^[1-9][0-9]*$' -or
-            $candidateRun.pull_requests[0].head.sha -cnotmatch '^[0-9a-f]{40}$'
-          ) {
-            throw 'candidate run must bind exactly one pull request and complete head OID'
+          if ($candidateRun.head_sha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'candidate run must expose a complete head OID'
           }
-          $candidatePr = [string]$candidateRun.pull_requests[0].number
-          $candidateHead = [string]$candidateRun.pull_requests[0].head.sha
+          $candidatePulls = @(
+            Invoke-RestMethod `
+              -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/commits/$($candidateRun.head_sha)/pulls" `
+              -Headers $headers
+          )
+          if (
+            $candidatePulls.Count -ne 1 -or
+            $candidatePulls[0].number -notmatch '^[1-9][0-9]*$' -or
+            $candidatePulls[0].head.sha -cne $candidateRun.head_sha -or
+            $candidatePulls[0].base.ref -cne 'main'
+          ) {
+            throw 'candidate head must bind exactly one canonical main pull request'
+          }
+          # GitHub may empty workflow_run.pull_requests after a linear rebase merge.
+          # Rehydrate that mutable association from the immutable head commit API.
+          $candidateRun.pull_requests = $candidatePulls
+          $candidateRun | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath .ci/candidate-run.json -Encoding utf8
+          $candidatePr = [string]$candidatePulls[0].number
+          $candidateHead = [string]$candidatePulls[0].head.sha
           & git fetch --no-tags --force origin "refs/pull/$candidatePr/head:refs/tsfg-proof/candidate"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $resolvedHead = (& git rev-parse refs/tsfg-proof/candidate).Trim()
