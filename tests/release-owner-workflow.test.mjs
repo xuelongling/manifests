@@ -46,15 +46,21 @@ test("recording Release Evidence consumes the real trusted Offline Proof unchang
   assert.match(source, /git ls-remote --tags https:\/\/github\.com\/xuelongling\/tsfg\.git/);
 });
 
-test("operation input artifacts come only from a successful trusted-main human run", async () => {
+test("Release Evidence input comes only from the unique release-inputs run and artifact", async () => {
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /name: Authenticate the operation input artifact run/);
-  assert.match(source, /actions\/runs\/\$TSFG_INPUT_RUN_ID/);
+  assert.match(source, /actions\/runs\/\$TSFG_INPUT_RUN_ID\/artifacts\?per_page=100/);
   assert.match(source, /run\.event !== "workflow_dispatch"/);
   assert.match(source, /run\.head_branch !== "main"/);
   assert.match(source, /run\.head_repository\?\.full_name !== "xuelongling\/manifests"/);
   assert.match(source, /!human\(run\.actor\) \|\| !human\(run\.triggering_actor\)/);
+  assert.match(source, /workflow !== "\.github\/workflows\/release-inputs\.yml"/);
+  assert.match(source, /release-provisional-inputs-\$\{process\.env\.TSFG_CANDIDATE_ID\}/);
+  assert.match(source, /matches\.length !== 1 \|\| matches\[0\]\.expired === true/);
+  assert.match(source, /input-source\.json/);
+  assert.match(source, /digest: matches\[0\]\.digest/);
   assert.match(source, /input-run-sha\.txt[\s\S]*git merge-base --is-ancestor/);
+  assert.ok(source.indexOf("Authenticate the operation input artifact run") < source.indexOf("Download the exact authenticated operation input"));
 });
 
 test("Release Owner workflow prepares a PR and never pushes main, tags, or releases", async () => {
@@ -71,6 +77,7 @@ test("Release Owner workflow publishes a run- and PR-bound transaction receipt",
   assert.match(source, /pull\.base\?\.ref !== "main"/);
   assert.match(source, /pull\.head\?\.ref !== process\.env\.TSFG_BRANCH/);
   assert.match(source, /baseCommit: process\.env\.GITHUB_SHA/);
+  assert.match(source, /input,\n/);
   assert.match(source, /transactionCommit: process\.env\.TSFG_TRANSACTION_COMMIT/);
   assert.match(source, /name: release-owner-\$\{\{ inputs\.operation \}\}-\$\{\{ github\.run_id \}\}/);
   assert.match(source, /path: \$\{\{ runner\.temp \}\}\/tsfg-release-owner\/receipt\.json/);

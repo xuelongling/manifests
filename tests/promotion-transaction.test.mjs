@@ -110,6 +110,18 @@ async function writeBundle(root, {
     productRevision,
     resolvedManifestDigest: `sha256:${candidateId}`,
   };
+  const releaseReports = ["linux-x86_64-gnu", "windows-x86_64-msvc"].map((target) => ({
+    candidateId,
+    licenseReport: {
+      path: `producers/${candidateId}/${target}/release/a/workspace-report.json`,
+      sha256: byteDigest(`${version}/${target}/license-report`),
+    },
+    reproducibilityReport: {
+      path: `reproducibility/${candidateId}/${target}/release/report.json`,
+      sha256: byteDigest(`${version}/${target}/reproducibility-report`),
+    },
+    target,
+  }));
   const files = {
     "offline-proof.json": {
       builds: [], candidate, candidateIds: [candidateId], candidateRun: {}, controllerRun: {},
@@ -132,13 +144,22 @@ async function writeBundle(root, {
         artifactManifestSha256: byteDigest(`${version}/${target}/artifact-manifest`),
         buildIdentityDigest: byteDigest(`${version}/${target}/identity`),
         checksumsSha256: byteDigest(`${version}/${target}/checksums`),
+        licenseReport: { ...releaseReports.find((entry) => entry.target === target).licenseReport },
+        reproducibilityReport: { ...releaseReports.find((entry) => entry.target === target).reproducibilityReport },
         target,
       })),
+      candidateEvidence: {
+        artifact: `manifest-candidate-evidence-${manifestRevision}`,
+        digest: byteDigest(`${version}/candidate-evidence-artifact`),
+        headSha: manifestRevision,
+        runId: "456",
+        workflow: ".github/workflows/manifest-pr.yml",
+      },
       candidateId, releaseStatus: "non-stable", schemaVersion: "1", status: "fixed",
     },
     "verified-candidate.json": {
       candidateIds: [candidateId], evidenceDigest: byteDigest(`candidate-evidence/${version}`),
-      evidenceRetentionDays: "90", promotionState: "Verified Candidate", requiredEvidence: {}, schemaVersion: "1",
+      evidenceRetentionDays: "90", promotionState: "Verified Candidate", releaseReports, requiredEvidence: {}, schemaVersion: "1",
     },
     "version-readiness.json": { candidateId, productVersion: version, schemaVersion: "1", status: "ready" },
   };

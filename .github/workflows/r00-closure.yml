@@ -34,11 +34,13 @@ jobs:
   validate-r00-closure:
     name: Validate complete durable R00 closure
     runs-on: ubuntu-24.04
+    environment: protected-release-environment
     steps:
       - name: Fail closed outside exact protected Manifest main
         env:
           TSFG_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
           TSFG_EXPECTED_RECORD_SHA256: ${{ inputs.expected_record_sha256 }}
+          TSFG_GOVERNANCE_TOKEN: ${{ secrets.TSFG_RELEASE_GOVERNANCE_TOKEN }}
           TSFG_RECORD_PATH: ${{ inputs.record_path }}
           TSFG_VERSION: ${{ inputs.product_version }}
         shell: bash
@@ -47,6 +49,7 @@ jobs:
           test "$GITHUB_EVENT_NAME" = workflow_dispatch
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_REPOSITORY" = xuelongling/manifests
+          test -n "$TSFG_GOVERNANCE_TOKEN"
           [[ "$TSFG_EXPECTED_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TSFG_EXPECTED_RECORD_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$TSFG_RECORD_PATH" = "releases/tsfg-v$TSFG_VERSION/closure.json"
@@ -74,9 +77,9 @@ jobs:
           test "$actual" = "$TSFG_EXPECTED_RECORD_SHA256"
           committed="$(git show "HEAD:$TSFG_RECORD_PATH" | sha256sum | cut -d ' ' -f 1)"
           test "$committed" = "${TSFG_EXPECTED_RECORD_SHA256#sha256:}"
-      - name: Validate API-backed runs, artifacts, OIDs, digests, Stable state, and release assets
+      - name: Validate API-backed governance, runs, artifacts, OIDs, Stable state, and release assets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.TSFG_RELEASE_GOVERNANCE_TOKEN }}
           TSFG_RECORD_PATH: ${{ inputs.record_path }}
         shell: bash
         run: >-

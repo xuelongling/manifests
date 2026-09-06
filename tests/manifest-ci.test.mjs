@@ -790,6 +790,13 @@ test("manifest verdict requires every product and agent evidence lane before dec
     assert.equal(verdict.requiredEvidence.producers, "8/8");
     assert.equal(verdict.requiredEvidence.reproducibility, "4/4");
     assert.match(verdict.evidenceDigest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(verdict.releaseReports.length, 2);
+    for (const report of verdict.releaseReports) {
+      assert.equal(report.candidateId, identity);
+      for (const field of ["licenseReport", "reproducibilityReport"]) {
+        assert.equal(report[field].sha256, byteDigest(await readFile(path.join(evidence, ...report[field].path.split("/")))));
+      }
+    }
 
     const compatibilityPath = path.join(evidence, "compatibility", identity, "linux-x86_64-gnu", "report.json");
     const foreignBaseline = JSON.parse(await readFile(compatibilityPath, "utf8"));

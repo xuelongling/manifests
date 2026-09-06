@@ -85,6 +85,16 @@ async function createInputs(root, repository, mutate = () => {}) {
     productRevision,
     resolvedManifestDigest: `sha256:${candidateId}`,
   };
+  const releaseReports = ["linux-x86_64-gnu", "windows-x86_64-msvc"].map((target) => ({
+    candidateId,
+    licenseReport: {
+      path: `producers/${candidateId}/${target}/release/a/workspace-report.json`, sha256: byteDigest(`${target}/license-report`),
+    },
+    reproducibilityReport: {
+      path: `reproducibility/${candidateId}/${target}/release/report.json`, sha256: byteDigest(`${target}/reproducibility-report`),
+    },
+    target,
+  }));
   const files = {
     "offline-proof.json": {
       builds: [], candidate, candidateIds: [candidateId], candidateRun: { runId: candidateRunId }, controllerRun: {},
@@ -102,13 +112,22 @@ async function createInputs(root, repository, mutate = () => {}) {
     "release-materials.json": {
       artifacts: ["linux-x86_64-gnu", "windows-x86_64-msvc"].map((target) => ({
         archiveSha256: byteDigest(`${target}/archive`), artifactManifestSha256: byteDigest(`${target}/manifest`),
-        buildIdentityDigest: byteDigest(`${target}/identity`), checksumsSha256: byteDigest(`${target}/checksums`), target,
+        buildIdentityDigest: byteDigest(`${target}/identity`), checksumsSha256: byteDigest(`${target}/checksums`),
+        licenseReport: { ...releaseReports.find((entry) => entry.target === target).licenseReport },
+        reproducibilityReport: { ...releaseReports.find((entry) => entry.target === target).reproducibilityReport }, target,
       })),
+      candidateEvidence: {
+        artifact: `manifest-candidate-evidence-${head}`,
+        digest: byteDigest("candidate-evidence-artifact"),
+        headSha: head,
+        runId: candidateRunId,
+        workflow: ".github/workflows/manifest-pr.yml",
+      },
       candidateId, releaseStatus: "non-stable", schemaVersion: "1", status: "fixed",
     },
     "verified-candidate.json": {
       candidateIds: [candidateId], evidenceDigest: byteDigest("candidate"), evidenceRetentionDays: "90",
-      promotionState: "Verified Candidate", requiredEvidence: {}, schemaVersion: "1",
+      promotionState: "Verified Candidate", releaseReports, requiredEvidence: {}, schemaVersion: "1",
     },
     "version-readiness.json": { candidateId, productVersion: version, schemaVersion: "1", status: "ready" },
   };
@@ -122,13 +141,16 @@ async function createInputs(root, repository, mutate = () => {}) {
       id: candidateRunId, event: "pull_request", headSha: head, path: ".github/workflows/manifest-pr.yml",
     }),
     "candidate-artifacts.json": {
-      artifacts: [{ expired: false, name: `manifest-verdict-${head}`, workflow_run: { id: Number(candidateRunId) } }],
+      artifacts: [
+        { digest: byteDigest("candidate-verdict-artifact"), expired: false, name: `manifest-verdict-${head}`, workflow_run: { id: Number(candidateRunId) } },
+        { digest: byteDigest("candidate-evidence-artifact"), expired: false, name: `manifest-candidate-evidence-${head}`, workflow_run: { id: Number(candidateRunId) } },
+      ],
     },
     "offline-proof-run.json": workflowRun({
       id: offlineRunId, event: "workflow_dispatch", headSha: head, path: ".github/workflows/tier1-offline-proof.yml",
     }),
     "offline-proof-artifacts.json": {
-      artifacts: [{ expired: false, name: `tier1-offline-proof-${candidateId}`, workflow_run: { id: Number(offlineRunId) } }],
+      artifacts: [{ digest: byteDigest("offline-proof-artifact"), expired: false, name: `tier1-offline-proof-${candidateId}`, workflow_run: { id: Number(offlineRunId) } }],
     },
   };
   mutate({ api, files });
@@ -189,6 +211,12 @@ for (const [name, mutate, pattern] of [
   ["missing candidate artifact", ({ api }) => { api["candidate-artifacts.json"].artifacts = []; }, /exact run/i],
   ["failed offline proof run", ({ api }) => { api["offline-proof-run.json"].conclusion = "failure"; }, /required API-backed workflow run/i],
   ["owner identity mismatch", ({ files }) => { files["owner-approval.json"].actor.login = "different-owner"; }, /dispatching human/i],
+  ["detached license report", ({ files }) => {
+    files["release-materials.json"].artifacts[0].licenseReport.sha256 = byteDigest("detached report");
+  }, /not bound to the Verified Candidate report/i],
+  ["detached Candidate evidence artifact", ({ api }) => {
+    api["candidate-artifacts.json"].artifacts.find((artifact) => artifact.name.startsWith("manifest-candidate-evidence-")).digest = byteDigest("detached evidence artifact");
+  }, /Candidate report source does not match/i],
 ]) {
   test(`prepare-release-bundle fails closed on ${name}`, async () => {
     const { repository, root } = await fixtureRoot();

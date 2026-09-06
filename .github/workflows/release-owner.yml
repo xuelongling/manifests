@@ -141,20 +141,16 @@ jobs:
           --ref "$GITHUB_REF"
           --sha "$GITHUB_SHA"
           --out "$TSFG_CONTROL_ROOT/authorization.json"
-      - name: Download the exact operation input
-        if: ${{ inputs.operation != 'promote-stable' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          github-token: ${{ github.token }}
-          name: ${{ inputs.input_artifact }}
-          path: ${{ runner.temp }}/tsfg-release-owner/input
-          run-id: ${{ inputs.input_run_id }}
       - name: Authenticate the operation input artifact run
         if: ${{ inputs.operation != 'promote-stable' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TSFG_CANDIDATE_ID: ${{ inputs.candidate_id }}
           TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_CURRENT_ACTOR: ${{ github.actor }}
+          TSFG_INPUT_ARTIFACT: ${{ inputs.input_artifact }}
           TSFG_INPUT_RUN_ID: ${{ inputs.input_run_id }}
+          TSFG_OPERATION: ${{ inputs.operation }}
         shell: bash
         run: |
           set -euo pipefail
@@ -164,10 +160,17 @@ jobs:
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$TSFG_INPUT_RUN_ID" \
             --output "$TSFG_CONTROL_ROOT/input-run.json"
+          curl --fail --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$TSFG_INPUT_RUN_ID/artifacts?per_page=100" \
+            --output "$TSFG_CONTROL_ROOT/input-artifacts.json"
           node -e '
             const fs = require("node:fs");
             const root = process.env.TSFG_CONTROL_ROOT;
             const run = JSON.parse(fs.readFileSync(`${root}/input-run.json`));
+            const artifacts = JSON.parse(fs.readFileSync(`${root}/input-artifacts.json`));
             const [workflow, workflowRef] = String(run.path ?? "").split("@", 2);
             const human = (actor) => actor?.type === "User" && actor.login && !/\[bot\]$/i.test(actor.login);
             if (String(run.id) !== process.env.TSFG_INPUT_RUN_ID || run.conclusion !== "success" ||
@@ -177,9 +180,32 @@ jobs:
                 run.repository?.full_name !== "xuelongling/manifests" ||
                 run.head_repository?.full_name !== "xuelongling/manifests" ||
                 !/^[0-9a-f]{40}$/.test(run.head_sha) || !human(run.actor) || !human(run.triggering_actor)) process.exit(1);
+            const matches = (artifacts.artifacts ?? []).filter((artifact) => artifact?.name === process.env.TSFG_INPUT_ARTIFACT);
+            if (matches.length !== 1 || matches[0].expired === true ||
+                String(matches[0].workflow_run?.id) !== process.env.TSFG_INPUT_RUN_ID ||
+                !/^sha256:[0-9a-f]{64}$/.test(matches[0].digest ?? "")) process.exit(1);
+            if (process.env.TSFG_OPERATION === "record-release-evidence" &&
+                (workflow !== ".github/workflows/release-inputs.yml" ||
+                 process.env.TSFG_INPUT_ARTIFACT !== `release-provisional-inputs-${process.env.TSFG_CANDIDATE_ID}` ||
+                 run.actor.login !== process.env.TSFG_CURRENT_ACTOR || run.triggering_actor.login !== process.env.TSFG_CURRENT_ACTOR)) process.exit(1);
             fs.writeFileSync(`${root}/input-run-sha.txt`, run.head_sha);
+            fs.writeFileSync(`${root}/input-source.json`, `${JSON.stringify({
+              artifact: matches[0].name,
+              digest: matches[0].digest,
+              headSha: run.head_sha,
+              runId: String(run.id),
+              workflow,
+            })}\n`);
           '
           git merge-base --is-ancestor "$(cat "$TSFG_CONTROL_ROOT/input-run-sha.txt")" "$GITHUB_SHA"
+      - name: Download the exact authenticated operation input
+        if: ${{ inputs.operation != 'promote-stable' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          name: ${{ inputs.input_artifact }}
+          path: ${{ runner.temp }}/tsfg-release-owner/input
+          run-id: ${{ inputs.input_run_id }}
       - name: Download the exact trusted Offline Proof
         if: ${{ inputs.operation == 'record-release-evidence' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -321,11 +347,14 @@ jobs:
           node -e '
             const fs = require("node:fs");
             const pull = JSON.parse(fs.readFileSync(`${process.env.TSFG_CONTROL_ROOT}/pull-response.json`));
+            const inputPath = `${process.env.TSFG_CONTROL_ROOT}/input-source.json`;
+            const input = fs.existsSync(inputPath) ? JSON.parse(fs.readFileSync(inputPath)) : null;
             if (!Number.isSafeInteger(pull.number) || pull.number < 1 || pull.base?.ref !== "main" ||
                 pull.head?.ref !== process.env.TSFG_BRANCH || !/^https:\/\/github\.com\/xuelongling\/manifests\/pull\/\d+$/.test(pull.html_url)) process.exit(1);
             fs.writeFileSync(`${process.env.TSFG_CONTROL_ROOT}/receipt.json`, `${JSON.stringify({
               actor: process.env.GITHUB_ACTOR,
               baseCommit: process.env.GITHUB_SHA,
+              input,
               operation: process.env.TSFG_OPERATION,
               productVersion: process.env.TSFG_VERSION,
               pullRequest: { number: pull.number, url: pull.html_url },
