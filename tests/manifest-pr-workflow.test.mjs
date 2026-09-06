@@ -107,8 +107,10 @@ test("every candidate is materialized and built by two isolated producers across
   assert.match(build, /ubuntu-24\.04/);
   assert.match(build, /windows-2025/);
   assert.match(build, /manifest-\$\{\{ matrix\.candidate\.id \}\}-\$\{\{ matrix\.producer \}\}\/workspace/);
-  assert.match(build, /repo\.py" init -u "\$manifest_source" -b "\$\{\{ matrix\.candidate\.manifestRevision \}\}" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
+  assert.match(build, /git branch --force tsfg-ci-candidate "\$\{\{ matrix\.candidate\.manifestRevision \}\}"/);
+  assert.match(build, /repo\.py" init -u "\$manifest_source" -b "tsfg-ci-candidate" -m "\$\{\{ matrix\.candidate\.manifest \}\}" --repo-rev=v2\.65 --worktree/);
   assert.match(build, /repo\.py" sync --verify/);
+  assert.match(build, /manifests\.git" config branch\.default\.merge "\$\{\{ matrix\.candidate\.manifestRevision \}\}"/);
   assert.match(build, /git -C "\$workspace\/\.repo\/manifests" remote set-url origin "\$TSFG_MANIFEST_URL"/);
   assert.doesNotMatch(build, /materialize-agent-workspace\.ts|materialized-identity\.json/);
   assert.match(build, /--manifest-revision ["']?\$\{\{ matrix\.candidate\.manifestRevision \}\}/);
@@ -147,13 +149,16 @@ test("compatibility uses candidate-bound artifacts in all four combinations on b
     "baseline/candidate",
     "candidate/candidate",
   ]) assert.match(compatibility, new RegExp(combination.replace("/", "\\/")));
-  assert.match(compatibility, /tsfg-build\.mjs test --target "\$\{\{ matrix\.target \}\}"/);
+  assert.match(compatibility, /tsfg-build(?:\.cmd)?["']? test --target ["']?\$\{\{ matrix\.target \}\}["']?/);
   assert.match(compatibility, /--compatibility-baseline/);
   assert.match(compatibility, /--compatibility-candidate/);
   assert.match(compatibility, /compatibility\/\$\{\{ matrix\.candidate\.id \}\}\/\$\{\{ matrix\.target \}\}\/report\.json/);
   assert.match(compatibility, /retention-days: 90/);
-  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*unshare --net --mount-proc/);
-  assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*deny-network\.cjs/);
+  assert.match(compatibility, /on Linux\n\s+if: runner\.os == 'Linux'[\s\S]*sudo unshare --mount --net/);
+  assert.match(compatibility, /on Windows\n\s+if: runner\.os == 'Windows'\n\s+shell: pwsh[\s\S]*tsfg-build\.cmd test/);
+  assert.match(compatibility, /tsfg-build(?:\.cmd)? prefetch/);
+  assert.match(compatibility, /manifest-compat-tool-cache\/\$\{\{ matrix\.target \}\}/);
+  assert.doesNotMatch(compatibility, /manifest-compatibility-\$\{\{ matrix\.candidate\.id \}\}\/tool-cache/);
 });
 
 test("reproducibility comparators are build-free and compare producer a with producer b", async () => {
@@ -176,24 +181,53 @@ test("Linux candidate phases enter the loopback-only namespace required by the b
   const source = await workflow();
   for (const name of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
     const selectedJob = job(source, name);
-    assert.match(selectedJob, /unshare --net --mount-proc/, name);
+    assert.match(selectedJob, /sudo sysctl -q kernel\.apparmor_restrict_unprivileged_userns=0/, name);
+    assert.match(selectedJob, /sudo unshare --mount --net bash -ceu/, name);
+    assert.doesNotMatch(selectedJob, /unshare --user/, name);
+    assert.match(selectedJob, /mount -t sysfs -o ro,nosuid,nodev,noexec sysfs \/sys/, name);
     assert.match(selectedJob, /ip link set lo up/, name);
-    assert.match(selectedJob, /setpriv --reuid="\$1" --regid="\$2" --clear-groups/, name);
+    assert.match(selectedJob, /exec setpriv --reuid "\$SUDO_UID" --regid "\$SUDO_GID" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs -- "\$@"/, name);
   }
 
   const build = job(source, "product-build");
   for (const command of ["verify-workspace", "build", "test", "package"]) {
-    assert.match(build, new RegExp(`offline "\\$workspace/tsfg/eng/tsfg-build" ${command}`));
+    assert.match(
+      build,
+      new RegExp(
+        `offline /usr/bin/env "TSFG_CACHE_DIR=\\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\\$TSFG_BOOTSTRAP_GIT_SHA256" "\\$workspace/tsfg/eng/tsfg-build" ${command}`,
+      ),
+    );
   }
-  assert.match(job(source, "reproducibility"), /offline "\.ci\/product\/eng\/tsfg-build" repro-check/);
+  assert.match(
+    job(source, "compatibility"),
+    /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256" "\$GITHUB_WORKSPACE\/\.ci\/product\/eng\/tsfg-build" test/,
+  );
+  assert.match(
+    job(source, "reproducibility"),
+    /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256" "\.ci\/product\/eng\/tsfg-build" repro-check/,
+  );
+});
+
+test("Linux launcher phases preserve the authenticated Bootstrap Trust Root Git", async () => {
+  const source = await workflow();
+  for (const jobName of ["workspace-verification", "product-build", "compatibility", "reproducibility"]) {
+    const linuxJob = job(source, jobName);
+    assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT="\$\(command -v git\)"/);
+    assert.match(linuxJob, /export TSFG_BOOTSTRAP_GIT_SHA256="\$\(sha256sum "\$TSFG_BOOTSTRAP_GIT" \| cut -d ' ' -f 1\)"/);
+    assert.match(linuxJob, /sudo unshare --mount --net bash -ceu/);
+    assert.match(
+      linuxJob,
+      /offline \/usr\/bin\/env "TSFG_CACHE_DIR=\$TSFG_CACHE_DIR" "TSFG_BOOTSTRAP_GIT=\$TSFG_BOOTSTRAP_GIT" "TSFG_BOOTSTRAP_GIT_SHA256=\$TSFG_BOOTSTRAP_GIT_SHA256"/,
+    );
+  }
 });
 
 test("Linux candidate builds publish candidate-bound canaries from before and after the offline chain", async () => {
   const source = await workflow();
   const build = job(source, "product-build");
   const before = build.indexOf('network-canary.mjs" --out "$canary_root/before.json"');
-  const buildCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" build');
-  const packageCommand = build.indexOf('offline "$workspace/tsfg/eng/tsfg-build" package');
+  const buildCommand = build.indexOf('"$workspace/tsfg/eng/tsfg-build" build');
+  const packageCommand = build.indexOf('"$workspace/tsfg/eng/tsfg-build" package');
   const after = build.indexOf('network-canary.mjs" --out "$canary_root/after.json"');
   assert.ok(before >= 0 && before < buildCommand, "the first real canary must run before build");
   assert.ok(after > packageCommand, "the second real canary must run after package");
