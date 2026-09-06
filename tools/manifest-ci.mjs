@@ -931,13 +931,14 @@ function validatePromotionBundle(input, version) {
 
   requireExactFields(offlineProof, [
     "builds", "candidate", "candidateIds", "candidateRun", "controllerRun", "evidenceDigest", "proof",
-    "requiredEvidence", "schemaVersion", "status",
+    "requiredEvidence", "resolvedManifestXmlSha256", "schemaVersion", "status",
   ], "Offline Proof");
   if (
     offlineProof.schemaVersion !== "1" || offlineProof.status !== "success" || offlineProof.proof !== "Offline Proof" ||
     canonicalize(offlineProof.candidateIds) !== canonicalize([candidateId])
   ) throw new ManifestCiError("successful Offline Proof for the exact Verified Candidate is required");
   requireDigest(offlineProof.evidenceDigest, "Offline Proof evidence digest");
+  requireDigest(offlineProof.resolvedManifestXmlSha256, "Offline Proof resolved manifest XML digest");
   const candidate = offlineProof.candidate;
   requireExactFields(candidate, [
     "agentRevision", "candidateOverlayDigest", "id", "manifest", "manifestRepository", "manifestRevision",
@@ -1131,12 +1132,9 @@ async function recordReleaseEvidence(options) {
     throw new ManifestCiError("Release Evidence owner must match the authenticated Release Owner workflow actor");
   }
   const head = git(repository, ["rev-parse", "HEAD"]).stdout.trim();
-  if (git(repository, ["merge-base", "--is-ancestor", input.candidate.manifestRevision, head], true).status !== 0) {
-    throw new ManifestCiError("candidate snapshot commit must already be an ancestor of the evidence commit");
-  }
   const snapshotXml = gitFile(repository, head, snapshotPath(version), true);
-  if (snapshotXml === undefined || gitFile(repository, input.candidate.manifestRevision, snapshotPath(version), true) !== snapshotXml) {
-    throw new ManifestCiError("immutable version snapshot must be committed before Release Evidence");
+  if (snapshotXml === undefined || byteDigest(snapshotXml) !== input.offlineProof.resolvedManifestXmlSha256) {
+    throw new ManifestCiError("immutable version snapshot bytes proven by Offline Proof must be committed before Release Evidence");
   }
   const projects = validateManifest(snapshotXml, snapshotPath(version));
   if (
@@ -1553,6 +1551,7 @@ async function loadVerifiedCandidate(options) {
   return {
     candidate, candidateEvidenceDigest, candidateId, candidatePlan, candidateRoot,
     candidateRun, candidateRunBytes, candidateRunId,
+    resolvedManifestXmlSha256: summary.resolvedManifestXmlSha256,
   };
 }
 
@@ -1576,7 +1575,7 @@ async function candidateProofInput(options) {
 async function offlineProof(options) {
   const {
     candidate, candidateEvidenceDigest, candidateId, candidateRoot,
-    candidateRun, candidateRunBytes, candidateRunId,
+    candidateRun, candidateRunBytes, candidateRunId, resolvedManifestXmlSha256,
   } = await loadVerifiedCandidate(options);
   const proofRoot = path.resolve(required(options, "--proof-evidence"));
   const controllerRunId = required(options, "--controller-run-id");
@@ -1896,6 +1895,7 @@ async function offlineProof(options) {
       windowsIndependentVms: `${vmEvidence.size}/2`,
       windowsReplays: `${windowsReplays}/2`,
     },
+    resolvedManifestXmlSha256,
     schemaVersion: "1",
     status: "success",
   }));

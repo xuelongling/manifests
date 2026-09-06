@@ -114,6 +114,7 @@ async function writeBundle(root, {
     "offline-proof.json": {
       builds: [], candidate, candidateIds: [candidateId], candidateRun: {}, controllerRun: {},
       evidenceDigest: byteDigest(`offline/${version}`), proof: "Offline Proof", requiredEvidence: {},
+      resolvedManifestXmlSha256: byteDigest(manifest(productRevision, agentRevision)),
       schemaVersion: "1", status: "success",
     },
     "owner-approval.json": {
@@ -226,10 +227,39 @@ test("first Stable is a three-commit, Owner-gated transaction with self-referenc
   }
 });
 
+test("Promotable binds identical landed snapshot bytes after a linear rebase merge rewrites the PR commit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-promotion-rebased-snapshot-"));
+  try {
+    const repository = await initializeRepository(root);
+    const version = "0.1.0";
+    const productRevision = "3".repeat(40);
+    const agentRevision = "4".repeat(40);
+    const snapshot = manifest(productRevision, agentRevision);
+    await mkdir(path.join(repository, "snapshots"), { recursive: true });
+    await writeFile(path.join(repository, "snapshots", `tsfg-v${version}.xml`), snapshot);
+    commitAll(repository, "land rebased snapshot");
+    const bundle = await writeBundle(root, {
+      version, productRevision, agentRevision, manifestRevision: "f".repeat(40),
+    });
+    const authorization = await writeAuthorization(root, "record-release-evidence");
+    const result = invoke([
+      "record-release-evidence", "--repository", repository, "--version", version,
+      "--bundle", bundle.bundleRoot, "--authorization", authorization,
+    ], repository);
+    assert.equal(result.status, 0, result.stderr);
+    const evidence = JSON.parse(await readFile(path.join(repository, "releases", "tsfg-v0.1.0", "evidence.json")));
+    assert.equal(evidence.candidate.manifestRevision, "f".repeat(40));
+    assert.equal(evidence.snapshot.sha256, byteDigest(snapshot));
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("Promotable fails closed for every missing or inconsistent gate", async (t) => {
   const cases = [
     ["required CI", (files) => { files["verified-candidate.json"].promotionState = "Candidate"; }, /required CI/i],
     ["Offline Proof", (files) => { files["offline-proof.json"].status = "failure"; }, /Offline Proof/i],
+    ["snapshot bytes", (files) => { files["offline-proof.json"].resolvedManifestXmlSha256 = byteDigest("other snapshot"); }, /snapshot bytes/i],
     ["Owner role", (files) => { files["owner-approval.json"].role = "Integration Owner"; }, /human Release Owner/i],
     ["bot approval", (files) => { files["owner-approval.json"].actor = { login: "release[bot]", type: "Bot" }; }, /human Release Owner/i],
     ["bot contract approval", (files) => {
