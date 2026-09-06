@@ -120,27 +120,56 @@ async function treeDigest(root) {
   return digest({ entries, schemaVersion: "1" });
 }
 
-async function writeOfflineProofFixture(root) {
+async function writeOfflineProofFixture(root, { mutateCandidateControl = false } = {}) {
   const candidateEvidence = path.join(root, "candidate-evidence");
+  const candidateRepository = path.join(root, "candidate-manifests");
   const proofEvidence = path.join(root, "proof-evidence");
-  const candidateId = "c".repeat(64);
+  const baselineProductRevision = "1".repeat(40);
   const productRevision = "3".repeat(40);
   const agentRevision = "2".repeat(40);
-  const manifestRevision = "4".repeat(40);
+  const baselineManifestXml = manifest(baselineProductRevision, agentRevision);
+  await initializeRepository(candidateRepository, baselineManifestXml);
+  const candidateControlPaths = [
+    ".github/workflows/manifest-pr.yml",
+    "tools/manifest-ci.mjs",
+    "tools/network-canary.mjs",
+  ];
+  for (const controlPath of candidateControlPaths) {
+    await mkdir(path.dirname(path.join(candidateRepository, controlPath)), { recursive: true });
+    await writeFile(path.join(candidateRepository, controlPath), `trusted ${controlPath}\n`);
+  }
+  const baselineRevision = commitAll(candidateRepository, "trusted candidate controls");
+  const candidateManifest = "snapshots/tsfg-v0.1.0.xml";
+  const resolvedManifestXml = manifest(productRevision, agentRevision);
+  await mkdir(path.join(candidateRepository, "snapshots"));
+  await writeFile(path.join(candidateRepository, candidateManifest), resolvedManifestXml);
+  if (mutateCandidateControl) {
+    await writeFile(path.join(candidateRepository, candidateControlPaths[0]), "candidate-controlled workflow\n");
+  }
+  const manifestRevision = commitAll(candidateRepository, "candidate manifest");
   const candidateOverlay = {
     baseline: {
-      manifest: "snapshots/tsfg-v0.1.0.xml",
+      manifest: "bootstrap/r00.xml",
       repository: "https://github.com/xuelongling/manifests.git",
-      revision: manifestRevision,
+      revision: baselineRevision,
     },
     replacements: [{ project: "tsfg.git", revision: productRevision }],
     schemaVersion: "1",
   };
+  const resolvedManifest = {
+    baseline: candidateOverlay.baseline,
+    projects: [
+      { name: ".agents.git", path: ".agents", revision: agentRevision },
+      { name: "tsfg.git", path: "tsfg", revision: productRevision },
+    ],
+    schemaVersion: "1",
+  };
+  const candidateId = digest(resolvedManifest).slice("sha256:".length);
   const candidate = {
     agentRevision,
     candidateOverlayDigest: digest(candidateOverlay),
     id: candidateId,
-    manifest: "snapshots/tsfg-v0.1.0.xml",
+    manifest: candidateManifest,
     manifestRepository: "https://github.com/xuelongling/manifests.git",
     manifestRevision,
     productRevision,
@@ -148,7 +177,7 @@ async function writeOfflineProofFixture(root) {
   };
   await writeJson(path.join(candidateEvidence, "manifest-plan.json"), {
     candidates: [{
-      agentRevision, baselineProductRevision: "1".repeat(40), candidateOverlayDigest: candidate.candidateOverlayDigest,
+      agentRevision, baselineProductRevision, candidateOverlayDigest: candidate.candidateOverlayDigest,
       id: candidateId, manifest: candidate.manifest, manifestRepository: candidate.manifestRepository,
       manifestRevision, productRevision,
     }],
@@ -156,10 +185,12 @@ async function writeOfflineProofFixture(root) {
     schemaVersion: "1",
   });
   await writeJson(path.join(candidateEvidence, "candidates", candidateId, "candidate-overlay.json"), candidateOverlay);
+  await writeJson(path.join(candidateEvidence, "candidates", candidateId, "resolved-manifest.json"), resolvedManifest);
+  await writeFile(path.join(candidateEvidence, "candidates", candidateId, "resolved-manifest.xml"), resolvedManifestXml);
   await writeJson(path.join(candidateEvidence, "candidates", candidateId, "candidate-summary.json"), {
     overlayDigest: candidate.candidateOverlayDigest,
     resolvedManifestDigest: candidate.resolvedManifestDigest,
-    resolvedManifestXmlSha256: byteDigest("resolved manifest XML"),
+    resolvedManifestXmlSha256: byteDigest(resolvedManifestXml),
     schemaVersion: "1",
   });
   const canaries = {
@@ -248,7 +279,12 @@ async function writeOfflineProofFixture(root) {
     head_sha: manifestRevision,
     id: Number(candidateRunId),
     path: ".github/workflows/manifest-pr.yml",
-    repository: { full_name: "xuelongling/manifests" },
+    pull_requests: [{
+      base: { ref: "main", repo: { id: 123 }, sha: baselineRevision },
+      head: { sha: manifestRevision },
+      number: 17,
+    }],
+    repository: { full_name: "xuelongling/manifests", id: 123 },
     status: "completed",
   });
   const writeSources = async (sourceRoot, names) => {
@@ -382,7 +418,7 @@ async function writeOfflineProofFixture(root) {
     }
   }
   return {
-    candidate, candidateEvidence, candidateId, candidateRun, candidateRunId, controllerRun, controllerRunId,
+    candidate, candidateEvidence, candidateId, candidateRepository, candidateRun, candidateRunId, controllerRun, controllerRunId,
     proofEvidence, verifiedVerdict,
   };
 }
@@ -390,6 +426,7 @@ async function writeOfflineProofFixture(root) {
 function offlineProofArguments(fixture, output) {
   return [
     "offline-proof",
+    "--repository", fixture.candidateRepository,
     "--candidate-evidence", fixture.candidateEvidence,
     "--verified-verdict", fixture.verifiedVerdict,
     "--candidate-id", fixture.candidateId,
@@ -452,7 +489,10 @@ test("manifest PR gate emits one content-addressed full-matrix candidate for a n
     await mkdir(path.join(sandbox, "snapshots"));
     await writeFile(
       path.join(sandbox, "snapshots", "tsfg-v0.1.0.xml"),
-      manifest(nextProduct, baseAgent),
+      manifest(nextProduct, baseAgent).replace(
+        "<manifest>",
+        "<!-- SPDX-License-Identifier: MIT -->\n<manifest>",
+      ),
     );
     runGit(sandbox, "add", ".");
     runGit(sandbox, "commit", "-m", "candidate snapshot");
@@ -637,8 +677,10 @@ test("manifest verdict requires every product and agent evidence lane before dec
       agentChanged: false,
       agentRevision,
       baselineProductRevision: "1".repeat(40),
+      candidateOverlayDigest: digest(overlay),
       id: identity,
       manifest: "snapshots/tsfg-v0.1.0.xml",
+      manifestRepository: "https://github.com/xuelongling/manifests.git",
       manifestRevision: "4".repeat(40),
       productChanged: true,
       productRevision,
@@ -851,6 +893,10 @@ test("resolved manifests reject floating revisions, shallow clones, extra projec
       `revision="${product}" upstream="refs/heads/main" />`,
       `revision="${product}" upstream="refs/heads/main"><project name="hidden.git" path="hidden" remote="github-xuelongling" revision="${"3".repeat(40)}" upstream="refs/heads/main" /></project>`,
     )],
+    ["SPDX before declaration", valid.replace(
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!-- SPDX-License-Identifier: MIT -->\n<?xml version="1.0" encoding="UTF-8"?>',
+    )],
   ]);
   for (const [name, candidateManifest] of variants) {
     const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-invalid-"));
@@ -925,7 +971,7 @@ test("candidate baseline switches to a default that resolves to an immutable Sta
   }
 });
 
-test("manifest PR gate cannot create or drift the first Stable default in this milestone", async () => {
+test("manifest PR gate rejects default creation or drift without a valid release transaction", async () => {
   const product = "1".repeat(40);
   const agent = "2".repeat(40);
   for (const mutation of ["create", "drift"]) {
@@ -1031,6 +1077,107 @@ test("offline proof rejects candidate evidence from outside the Manifest PR work
     const fixture = await writeOfflineProofFixture(sandbox);
     const candidateRun = JSON.parse(await readFile(fixture.candidateRun, "utf8"));
     candidateRun.path = ".github/workflows/untrusted.yml";
+    await writeJson(fixture.candidateRun, candidateRun);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /trusted Manifest PR workflow/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof independently recomputes the resolved Candidate content address", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-address-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    await writeJson(
+      path.join(fixture.candidateEvidence, "candidates", fixture.candidateId, "resolved-manifest.json"),
+      {
+        baseline: { manifest: "forged.xml", repository: "https://example.invalid/manifests.git", revision: "9".repeat(40) },
+        projects: [],
+        schemaVersion: "1",
+      },
+    );
+    const forgedVerdict = JSON.parse(await readFile(fixture.verifiedVerdict, "utf8"));
+    forgedVerdict.evidenceDigest = await treeDigest(fixture.candidateEvidence);
+    await writeJson(fixture.verifiedVerdict, forgedVerdict);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /resolved manifest identity/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects resolved Candidate bytes detached from the manifest commit", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-source-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const identityRoot = path.join(fixture.candidateEvidence, "candidates", fixture.candidateId);
+    const resolvedXmlPath = path.join(identityRoot, "resolved-manifest.xml");
+    const detachedXml = (await readFile(resolvedXmlPath, "utf8")).replace(
+      '<?xml version="1.0" encoding="UTF-8"?>\n',
+      '<?xml version="1.0" encoding="UTF-8"?>\n\n',
+    );
+    await writeFile(resolvedXmlPath, detachedXml);
+    const summaryPath = path.join(identityRoot, "candidate-summary.json");
+    const forgedSummary = JSON.parse(await readFile(summaryPath, "utf8"));
+    forgedSummary.resolvedManifestXmlSha256 = byteDigest(detachedXml);
+    await writeJson(summaryPath, forgedSummary);
+    const forgedVerdict = JSON.parse(await readFile(fixture.verifiedVerdict, "utf8"));
+    forgedVerdict.evidenceDigest = await treeDigest(fixture.candidateEvidence);
+    await writeJson(fixture.verifiedVerdict, forgedVerdict);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /manifest revision/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof rejects Candidate-controlled hosted proof code", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-control-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox, { mutateCandidateControl: true });
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /hosted proof control/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof requires the Candidate run to target protected manifest main", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-base-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const candidateRun = JSON.parse(await readFile(fixture.candidateRun, "utf8"));
+    candidateRun.pull_requests[0].base.ref = "untrusted-base";
+    await writeJson(fixture.candidateRun, candidateRun);
+    const output = path.join(sandbox, "offline-proof.json");
+    const result = invoke(offlineProofArguments(fixture, output));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /trusted Manifest PR workflow/i);
+    await assert.rejects(readFile(output));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("offline proof requires the Candidate base to belong to the canonical Manifest Repository", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "tsfg-manifest-offline-proof-candidate-base-repository-"));
+  try {
+    const fixture = await writeOfflineProofFixture(sandbox);
+    const candidateRun = JSON.parse(await readFile(fixture.candidateRun, "utf8"));
+    candidateRun.pull_requests[0].base.repo.id = 999;
     await writeJson(fixture.candidateRun, candidateRun);
     const output = path.join(sandbox, "offline-proof.json");
     const result = invoke(offlineProofArguments(fixture, output));
