@@ -321,7 +321,10 @@ commit or operation.
 The workflow never pushes `main`, creates a tag, creates a GitHub Release, or
 merges its result. It writes exactly one operation commit to a run-specific
 branch and opens a pull request so protected-main required checks remain the
-commit gate. `record-release-evidence` additionally downloads the exact
+commit gate. A successful run publishes a 90-day receipt binding the operation,
+run, actor, source main OID, transaction commit, branch, and resulting pull
+request; the closure record cites that exact artifact and API run. The
+`record-release-evidence` operation additionally downloads the exact
 `tier1-offline-proof-<candidate-id>` artifact from a successful trusted
 `tier1-offline-proof.yml` run and requires it to be byte-identical to the
 Offline Proof in the provisional bundle. A claimed or locally fabricated proof
@@ -371,6 +374,31 @@ Create a provisional evidence directory containing exactly:
 - `bundle.json`, whose sorted `entries` hash the six files above and whose
   `contentAddress` is the canonical JSON digest of
   `{ entries, schemaVersion: "1" }`. The bundle never hashes itself.
+
+### Stage real provisional inputs
+
+`.github/workflows/release-inputs.yml` is the only supported producer for the
+provisional bundle consumed by `release-owner.yml`. A human Release Owner must
+dispatch it from the exact protected `main` commit and enter the Product
+Version, Candidate and Offline Proof run identities, exact pre-authored JSON
+bytes, and the independent SHA-256 of `owner-approval.json`. The approval input
+is evidence, not a credential, and must contain no secret.
+
+The workflow runs in `protected-release-environment`, reads its run and review
+history and the referenced workflow runs and artifacts back through the GitHub
+API, resolves the already-existing immutable Product tag, and invokes
+`prepare-release-bundle`. That command requires the approval actor to be the
+same human who dispatched the run and copies every input byte unchanged. It
+atomically publishes
+`release-provisional-inputs-<complete-candidate-id>` for 90 days only after all
+six records, both evidence runs, artifact identities, tag target, Candidate,
+version, and supplied approval digest agree.
+
+The workflow cannot create `owner-approval.json`, infer an approval from a run,
+approve a deployment, create a tag, or declare Stable. Missing Stable
+prerequisites therefore leave no bundle. Pass the successful workflow run ID
+and artifact name to the `record-release-evidence` operation of
+`release-owner.yml`; its independent API checks remain mandatory.
 
 Record the versioned, self-reference-free Release Evidence and Promotable
 state, then commit both files before attempting Stable promotion:
@@ -442,6 +470,55 @@ Rollback writes a new commit, repoints `default.xml` to that unchanged snapshot,
 and moves only the current bad release from `Stable` to `Withdrawn`. It does not
 move a product tag, modify a historical snapshot or Release Evidence, revive a
 `Superseded` state, or rewrite any prior commit.
+
+## R00 acceptance and closure record
+
+R00 closure is represented by exactly one immutable source record:
+`releases/tsfg-v0.1.0/closure.json`. The repository gate validates its closed
+schema on the pull request, but that shape check alone does not close R00. The
+record must enumerate each of these evidence lanes exactly once:
+
+- Product CI, Agent CI, and Manifest Candidate CI;
+- minimum-baseline VM controller and Offline Proof;
+- provisional release inputs;
+- Release Evidence, Stable promotion, and release finalization transactions.
+
+Every lane binds the canonical repository and workflow path, successful run ID,
+head OID, and every relied-on artifact name and `sha256:` digest. Its acceptance
+table links all R00 conditions—fresh bootstrap, topology, workspace
+verification, offline matrix, empty contracts, reproducibility, Tier 1 proof,
+Source/license/provenance, required CI, staged evidence, Stable default,
+long-term replay, and scope containment—to the required lanes. The release
+section also binds the immutable Product tag, GitHub Release identity, and the
+archive, Artifact Manifest, external checksums, license report, and
+reproducibility report for each Tier 1 target. The repository section records
+the Agent main OID, Stable Manifest OID, and post-Stable Product main OID.
+
+After the Owner-created transaction pull requests have landed, publication is
+complete, the Product GitHub Release and long-term assets really exist, and
+Product main reports `0.2.0-dev.0`, commit the closure record through protected
+main. Then a human dispatches `.github/workflows/r00-closure.yml` with the exact
+main OID, record path, Product Version, and byte SHA-256. The workflow refetches
+main and invokes the sole complete validator:
+
+```powershell
+node tools/manifest-ci.mjs validate-r00-closure `
+    --repository . `
+    --record releases/tsfg-v0.1.0/closure.json `
+    --validation-run-id $env:GITHUB_RUN_ID `
+    --validation-sha $env:GITHUB_SHA `
+    --out .ci/r00-closure-report.json
+```
+
+The validator reads current GitHub API state for all three repositories, every
+declared run and artifact, the Product tag and release assets. It also verifies
+the committed Release Evidence, publication metadata, Stable state and default
+manifest against the immutable snapshot and Candidate OIDs. Missing, failed,
+expired, duplicate, moved, non-ancestor, or digest-inconsistent evidence fails
+before a report is published. Until the real Owner action, Stable commit,
+long-term materials, remote branch controls, and API-visible evidence exist,
+this workflow must fail; neither this repository nor an agent may manufacture
+substitutes.
 
 The trusted workflow runs only on a self-hosted runner carrying the
 `tsfg-tier1-vm-controller` label. Repository variable

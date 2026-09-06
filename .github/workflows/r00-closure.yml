@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: MIT
+
+name: R00 Closure Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_version:
+        description: Stable Product Version without the tsfg-v prefix
+        required: true
+        type: string
+      record_path:
+        description: Committed releases/tsfg-v<version>/closure.json path
+        required: true
+        type: string
+      expected_main_sha:
+        description: Exact protected Manifest main commit containing the closure record
+        required: true
+        type: string
+      expected_record_sha256:
+        description: Exact sha256-prefixed digest of the committed closure record bytes
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: r00-closure-validation
+  cancel-in-progress: false
+
+jobs:
+  validate-r00-closure:
+    name: Validate complete durable R00 closure
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail closed outside exact protected Manifest main
+        env:
+          TSFG_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+          TSFG_EXPECTED_RECORD_SHA256: ${{ inputs.expected_record_sha256 }}
+          TSFG_RECORD_PATH: ${{ inputs.record_path }}
+          TSFG_VERSION: ${{ inputs.product_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = xuelongling/manifests
+          [[ "$TSFG_EXPECTED_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TSFG_EXPECTED_RECORD_SHA256" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$TSFG_RECORD_PATH" = "releases/tsfg-v$TSFG_VERSION/closure.json"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/heads/main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.20.0
+      - name: Verify committed closure input and current remote main
+        env:
+          TSFG_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+          TSFG_EXPECTED_RECORD_SHA256: ${{ inputs.expected_record_sha256 }}
+          TSFG_RECORD_PATH: ${{ inputs.record_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$TSFG_EXPECTED_MAIN_SHA"
+          test "$(git rev-parse HEAD)" = "$TSFG_EXPECTED_MAIN_SHA"
+          git fetch --no-tags origin refs/heads/main
+          test "$(git rev-parse FETCH_HEAD)" = "$TSFG_EXPECTED_MAIN_SHA"
+          actual="sha256:$(sha256sum "$TSFG_RECORD_PATH" | cut -d ' ' -f 1)"
+          test "$actual" = "$TSFG_EXPECTED_RECORD_SHA256"
+          committed="$(git show "HEAD:$TSFG_RECORD_PATH" | sha256sum | cut -d ' ' -f 1)"
+          test "$committed" = "${TSFG_EXPECTED_RECORD_SHA256#sha256:}"
+      - name: Validate API-backed runs, artifacts, OIDs, digests, Stable state, and release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TSFG_RECORD_PATH: ${{ inputs.record_path }}
+        shell: bash
+        run: >-
+          node tools/manifest-ci.mjs validate-r00-closure
+          --repository . --record "$TSFG_RECORD_PATH"
+          --validation-run-id "$GITHUB_RUN_ID" --validation-sha "$GITHUB_SHA"
+          --out .ci/r00-closure-report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: r00-closure-${{ inputs.product_version }}-${{ inputs.expected_main_sha }}
+          path: .ci/r00-closure-report.json
+          retention-days: 90

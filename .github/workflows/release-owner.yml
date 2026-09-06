@@ -306,4 +306,39 @@ jobs:
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls" \
-            --data-binary "@$TSFG_CONTROL_ROOT/pull-request.json"
+            --data-binary "@$TSFG_CONTROL_ROOT/pull-request.json" \
+            --output "$TSFG_CONTROL_ROOT/pull-response.json"
+      - name: Record the immutable transaction receipt
+        env:
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_OPERATION: ${{ inputs.operation }}
+          TSFG_VERSION: ${{ inputs.product_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TSFG_BRANCH="$(cat "$TSFG_CONTROL_ROOT/branch.txt")"
+          export TSFG_TRANSACTION_COMMIT="$(git rev-parse HEAD)"
+          node -e '
+            const fs = require("node:fs");
+            const pull = JSON.parse(fs.readFileSync(`${process.env.TSFG_CONTROL_ROOT}/pull-response.json`));
+            if (!Number.isSafeInteger(pull.number) || pull.number < 1 || pull.base?.ref !== "main" ||
+                pull.head?.ref !== process.env.TSFG_BRANCH || !/^https:\/\/github\.com\/xuelongling\/manifests\/pull\/\d+$/.test(pull.html_url)) process.exit(1);
+            fs.writeFileSync(`${process.env.TSFG_CONTROL_ROOT}/receipt.json`, `${JSON.stringify({
+              actor: process.env.GITHUB_ACTOR,
+              baseCommit: process.env.GITHUB_SHA,
+              operation: process.env.TSFG_OPERATION,
+              productVersion: process.env.TSFG_VERSION,
+              pullRequest: { number: pull.number, url: pull.html_url },
+              repository: process.env.GITHUB_REPOSITORY,
+              runId: process.env.GITHUB_RUN_ID,
+              schemaVersion: "1",
+              transactionBranch: process.env.TSFG_BRANCH,
+              transactionCommit: process.env.TSFG_TRANSACTION_COMMIT,
+            })}\n`);
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          if-no-files-found: error
+          name: release-owner-${{ inputs.operation }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/tsfg-release-owner/receipt.json
+          retention-days: 90
