@@ -346,6 +346,12 @@ snapshot named by the Verified Candidate and Offline Proof. The product tag and
 non-Stable release materials, including external checksums for both Tier 1
 targets, must also be fixed before the next command runs.
 
+Protected main requires linear history, so GitHub rebase-and-merge may assign
+the landed snapshot commit a different OID from the Manifest PR head. Offline
+Proof therefore records the resolved manifest XML digest, and the evidence
+transaction requires the immutable snapshot bytes on current main to match that
+digest exactly; it does not mistake a rewritten commit OID for changed content.
+
 Create a provisional evidence directory containing exactly:
 
 - `verified-candidate.json` from the successful Manifest PR verdict;
