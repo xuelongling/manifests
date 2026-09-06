@@ -74,11 +74,9 @@ jobs:
           if ($candidateRun.head_sha -cnotmatch '^[0-9a-f]{40}$') {
             throw 'candidate run must expose a complete head OID'
           }
-          $candidatePulls = @(
-            Invoke-RestMethod `
-              -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/commits/$($candidateRun.head_sha)/pulls" `
-              -Headers $headers
-          )
+          $candidatePulls = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/commits/$($candidateRun.head_sha)/pulls" `
+            -Headers $headers
           if (
             $candidatePulls.Count -ne 1 -or
             $candidatePulls[0].number -notmatch '^[1-9][0-9]*$' -or
