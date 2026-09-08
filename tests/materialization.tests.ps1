@@ -46,6 +46,12 @@ exit /b 0
     $agentProject = @($manifest.manifest.project | Where-Object path -eq ".agents")
     $agentProject.SetAttribute("revision", $agentRevision)
     $manifest.Save((Join-Path $manifestRoot "bootstrap/r00.xml"))
+    Set-Content -LiteralPath (Join-Path $path ".repo/manifest.xml") -Encoding utf8NoBOM -Value @'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <include name="bootstrap/r00.xml" />
+</manifest>
+'@
     return $path
 }
 
@@ -104,6 +110,25 @@ function Test-Case {
         Write-Host "FAIL $Name"
         Write-Host "  $($_.Exception.Message)"
     }
+}
+
+Test-Case "activation verifier does not depend on Get-FileHash module discovery" {
+    $verifier = Get-Content -LiteralPath (Join-Path $repoRoot "tools/verify-agent-activation.ps1") -Raw
+    if ($verifier -match '\bGet-FileHash\b') {
+        throw "activation verifier still depends on Get-FileHash"
+    }
+    if ($verifier -notmatch '\[System\.Security\.Cryptography\.SHA256\]::Create\(\)') {
+        throw "activation verifier does not use an in-process SHA-256 implementation"
+    }
+    if ($verifier -notmatch '\.repo/manifest\.xml' -or $verifier -match '\.repo/manifests/bootstrap/r00\.xml') {
+        throw "activation verifier does not consume repo's selected manifest view"
+    }
+}
+
+if (-not $IsWindows) {
+    Write-Host "SKIP repo.cmd materialization fixtures require Windows"
+    Write-Host "$passed passed, $failed failed"
+    exit $(if ($failed -eq 0) { 0 } else { 1 })
 }
 
 Test-Case "sync rejects copied Agent Activation Surface entries" {
@@ -180,6 +205,39 @@ Test-Case "sync rejects activation paths that traverse a junction outside the wo
         }
         if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
             throw "sync invoked repo before rejecting the junction escape"
+        }
+    }
+    finally {
+        Remove-MaterializationSandbox -Path $sandbox
+        if (Test-Path -LiteralPath $outside) {
+            Remove-Item -LiteralPath $outside -Recurse -Force
+        }
+    }
+}
+
+Test-Case "sync rejects manifest includes that traverse a junction outside the manifest repository" {
+    $sandbox = New-MaterializationSandbox
+    $outside = Join-Path $temporaryRoot ("tsfg-materialization-manifest-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        Copy-Item -LiteralPath (Join-Path $sandbox ".repo/manifests/bootstrap/r00.xml") -Destination (Join-Path $outside "r00.xml")
+        New-Item -ItemType Junction -Path (Join-Path $sandbox ".repo/manifests/linked") -Target $outside | Out-Null
+        Set-Content -LiteralPath (Join-Path $sandbox ".repo/manifest.xml") -Encoding utf8NoBOM -Value @'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <include name="linked/r00.xml" />
+</manifest>
+'@
+
+        $result = Invoke-SandboxSync -Sandbox $sandbox
+        if ($result.ExitCode -eq 0) {
+            throw "sync accepted a manifest include through an out-of-repository junction"
+        }
+        if ($result.Output -notmatch "manifest include traverses a reparse point") {
+            throw "sync did not report the manifest include containment failure: $($result.Output)"
+        }
+        if (Test-Path -LiteralPath (Join-Path $sandbox "repo-invocations.txt")) {
+            throw "sync invoked repo before rejecting the manifest include junction"
         }
     }
     finally {

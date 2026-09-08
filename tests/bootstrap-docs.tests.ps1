@@ -26,6 +26,13 @@ function Test-Case {
     }
 }
 
+Test-Case "README declares first-party MIT provenance" {
+    $readme = Get-Content -Raw -LiteralPath $readmePath
+    if (-not $readme.StartsWith("<!-- SPDX-License-Identifier: MIT -->", [System.StringComparison]::Ordinal)) {
+        throw "README must begin with the canonical SPDX identifier"
+    }
+}
+
 Test-Case "README pins the official launcher content and release" {
     $readme = Get-Content -Raw -LiteralPath $readmePath
     foreach ($required in @(

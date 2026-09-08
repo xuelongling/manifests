@@ -9,6 +9,12 @@ $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $passed = 0
 $failed = 0
 
+if (-not $IsWindows) {
+    Write-Host "SKIP repo.cmd wrapper fixtures require Windows"
+    Write-Host "0 passed, 0 failed"
+    exit 0
+}
+
 function Assert-Equal {
     param(
         [Parameter(Mandatory)] $Expected,

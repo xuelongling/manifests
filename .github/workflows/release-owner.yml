@@ -1,0 +1,309 @@
+# SPDX-License-Identifier: MIT
+
+name: Release Owner Transaction
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Owner-gated manifest transaction to prepare as a protected-main pull request
+        required: true
+        type: choice
+        options:
+          - record-release-evidence
+          - promote-stable
+          - finalize-release
+          - rollback
+      product_version:
+        description: Release Product Version without the tsfg-v prefix
+        required: true
+        type: string
+      expected_main_sha:
+        description: Exact protected main commit on which the transaction must be based
+        required: true
+        type: string
+      input_run_id:
+        description: Run containing the provisional bundle, publication metadata, or rollback approval artifact
+        required: false
+        type: string
+      input_artifact:
+        description: Exact input artifact name; unused only by promote-stable
+        required: false
+        type: string
+      candidate_id:
+        description: Exact Candidate content address; required by record-release-evidence
+        required: false
+        type: string
+      offline_proof_run_id:
+        description: Successful trusted Tier 1 Offline Proof run; required by record-release-evidence
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-owner-transaction
+  cancel-in-progress: false
+
+jobs:
+  release-owner:
+    name: Prepare Owner-approved transaction
+    runs-on: ubuntu-24.04
+    environment: protected-release-environment
+    steps:
+      - name: Fail closed on ref, actor, or incomplete operation input
+        env:
+          TSFG_ACTOR: ${{ github.actor }}
+          TSFG_CANDIDATE_ID: ${{ inputs.candidate_id }}
+          TSFG_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+          TSFG_INPUT_ARTIFACT: ${{ inputs.input_artifact }}
+          TSFG_INPUT_RUN_ID: ${{ inputs.input_run_id }}
+          TSFG_OFFLINE_PROOF_RUN_ID: ${{ inputs.offline_proof_run_id }}
+          TSFG_OPERATION: ${{ inputs.operation }}
+          TSFG_RELEASE_OWNER_TOKEN: ${{ secrets.TSFG_RELEASE_OWNER_TOKEN }}
+          TSFG_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = xuelongling/manifests
+          test "$TSFG_ACTOR" = "$TSFG_TRIGGERING_ACTOR"
+          test -n "$TSFG_RELEASE_OWNER_TOKEN"
+          case "$TSFG_ACTOR" in *'[bot]'|github-actions) exit 1 ;; esac
+          [[ "$TSFG_EXPECTED_MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$TSFG_OPERATION" in
+            record-release-evidence)
+              [[ "$TSFG_CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]]
+              [[ "$TSFG_OFFLINE_PROOF_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [[ "$TSFG_INPUT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              test -n "$TSFG_INPUT_ARTIFACT"
+              ;;
+            promote-stable) ;;
+            finalize-release|rollback)
+              [[ "$TSFG_INPUT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              test -n "$TSFG_INPUT_ARTIFACT"
+              ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.TSFG_RELEASE_OWNER_TOKEN }}
+          ref: refs/heads/main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.20.0
+      - name: Verify the exact protected main source
+        env:
+          TSFG_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$TSFG_EXPECTED_MAIN_SHA"
+          test "$(git rev-parse HEAD)" = "$TSFG_EXPECTED_MAIN_SHA"
+          git fetch --no-tags origin refs/heads/main
+          test "$(git rev-parse FETCH_HEAD)" = "$TSFG_EXPECTED_MAIN_SHA"
+      - name: Fetch the GitHub run and protected-environment review facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TSFG_CONTROL_ROOT"
+          for endpoint in "" /approvals; do
+            name=run
+            test -z "$endpoint" || name=reviews
+            curl --fail --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID$endpoint" \
+              --output "$TSFG_CONTROL_ROOT/$name.json"
+          done
+      - name: Authenticate the trusted Release Owner execution context
+        env:
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_OPERATION: ${{ inputs.operation }}
+        shell: bash
+        run: >-
+          node tools/manifest-ci.mjs release-owner-context
+          --repository .
+          --run "$TSFG_CONTROL_ROOT/run.json"
+          --reviews "$TSFG_CONTROL_ROOT/reviews.json"
+          --run-id "$GITHUB_RUN_ID"
+          --operation "$TSFG_OPERATION"
+          --actor "$GITHUB_ACTOR"
+          --triggering-actor "$GITHUB_TRIGGERING_ACTOR"
+          --ref "$GITHUB_REF"
+          --sha "$GITHUB_SHA"
+          --out "$TSFG_CONTROL_ROOT/authorization.json"
+      - name: Download the exact operation input
+        if: ${{ inputs.operation != 'promote-stable' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          name: ${{ inputs.input_artifact }}
+          path: ${{ runner.temp }}/tsfg-release-owner/input
+          run-id: ${{ inputs.input_run_id }}
+      - name: Authenticate the operation input artifact run
+        if: ${{ inputs.operation != 'promote-stable' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_INPUT_RUN_ID: ${{ inputs.input_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$TSFG_INPUT_RUN_ID" \
+            --output "$TSFG_CONTROL_ROOT/input-run.json"
+          node -e '
+            const fs = require("node:fs");
+            const root = process.env.TSFG_CONTROL_ROOT;
+            const run = JSON.parse(fs.readFileSync(`${root}/input-run.json`));
+            const [workflow, workflowRef] = String(run.path ?? "").split("@", 2);
+            const human = (actor) => actor?.type === "User" && actor.login && !/\[bot\]$/i.test(actor.login);
+            if (String(run.id) !== process.env.TSFG_INPUT_RUN_ID || run.conclusion !== "success" ||
+                run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
+                (workflowRef !== undefined && workflowRef !== "main" && workflowRef !== "refs/heads/main") ||
+                !workflow.startsWith(".github/workflows/") || !workflow.endsWith(".yml") ||
+                run.repository?.full_name !== "xuelongling/manifests" ||
+                run.head_repository?.full_name !== "xuelongling/manifests" ||
+                !/^[0-9a-f]{40}$/.test(run.head_sha) || !human(run.actor) || !human(run.triggering_actor)) process.exit(1);
+            fs.writeFileSync(`${root}/input-run-sha.txt`, run.head_sha);
+          '
+          git merge-base --is-ancestor "$(cat "$TSFG_CONTROL_ROOT/input-run-sha.txt")" "$GITHUB_SHA"
+      - name: Download the exact trusted Offline Proof
+        if: ${{ inputs.operation == 'record-release-evidence' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          name: tier1-offline-proof-${{ inputs.candidate_id }}
+          path: ${{ runner.temp }}/tsfg-release-owner/offline-proof
+          run-id: ${{ inputs.offline_proof_run_id }}
+      - name: Refuse synthetic or stale Offline Proof input
+        if: ${{ inputs.operation == 'record-release-evidence' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TSFG_CANDIDATE_ID: ${{ inputs.candidate_id }}
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_OFFLINE_PROOF_RUN_ID: ${{ inputs.offline_proof_run_id }}
+          TSFG_VERSION: ${{ inputs.product_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$TSFG_OFFLINE_PROOF_RUN_ID" \
+            --output "$TSFG_CONTROL_ROOT/offline-proof-run.json"
+          node -e '
+            const fs = require("node:fs");
+            const root = process.env.TSFG_CONTROL_ROOT;
+            const run = JSON.parse(fs.readFileSync(`${root}/offline-proof-run.json`));
+            const proof = JSON.parse(fs.readFileSync(`${root}/offline-proof/offline-proof.json`));
+            const [workflow, workflowRef] = String(run.path ?? "").split("@", 2);
+            if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
+                (workflowRef !== undefined && workflowRef !== "main" && workflowRef !== "refs/heads/main") ||
+                workflow !== ".github/workflows/tier1-offline-proof.yml" ||
+                run.repository?.full_name !== "xuelongling/manifests" ||
+                !/^[0-9a-f]{40}$/.test(run.head_sha) ||
+                proof.status !== "success" || proof.proof !== "Offline Proof" ||
+                JSON.stringify(proof.candidateIds) !== JSON.stringify([process.env.TSFG_CANDIDATE_ID])) process.exit(1);
+            fs.writeFileSync(`${root}/offline-proof-sha.txt`, run.head_sha);
+          '
+          git merge-base --is-ancestor "$(cat "$TSFG_CONTROL_ROOT/offline-proof-sha.txt")" "$GITHUB_SHA"
+          cmp --silent \
+            "$TSFG_CONTROL_ROOT/offline-proof/offline-proof.json" \
+            "$TSFG_CONTROL_ROOT/input/offline-proof.json"
+          node -e '
+            const fs = require("node:fs");
+            const root = process.env.TSFG_CONTROL_ROOT;
+            const tag = JSON.parse(fs.readFileSync(`${root}/input/product-tag.json`));
+            if (tag.name !== `tsfg-v${process.env.TSFG_VERSION}` || !/^[0-9a-f]{40}$/.test(tag.targetRevision)) process.exit(1);
+            fs.writeFileSync(`${root}/product-tag-name.txt`, tag.name);
+            fs.writeFileSync(`${root}/product-tag-target.txt`, tag.targetRevision);
+          '
+          tag_name=$(cat "$TSFG_CONTROL_ROOT/product-tag-name.txt")
+          tag_target=$(cat "$TSFG_CONTROL_ROOT/product-tag-target.txt")
+          git ls-remote --tags https://github.com/xuelongling/tsfg.git \
+            "refs/tags/$tag_name" "refs/tags/$tag_name^{}" > "$TSFG_CONTROL_ROOT/product-tag-refs.txt"
+          resolved_tag=$(awk -v peeled="refs/tags/$tag_name^{}" -v direct="refs/tags/$tag_name" \
+            '$2 == peeled { print $1; found=1 } $2 == direct { fallback=$1 } END { if (!found) print fallback }' \
+            "$TSFG_CONTROL_ROOT/product-tag-refs.txt")
+          test "$resolved_tag" = "$tag_target"
+      - name: Apply exactly one authorized transaction to a release branch
+        env:
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_OPERATION: ${{ inputs.operation }}
+          TSFG_VERSION: ${{ inputs.product_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="release-owner/run-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
+          git switch --create "$branch"
+          authorization="$TSFG_CONTROL_ROOT/authorization.json"
+          case "$TSFG_OPERATION" in
+            record-release-evidence)
+              node tools/manifest-ci.mjs record-release-evidence --repository . --version "$TSFG_VERSION" \
+                --bundle "$TSFG_CONTROL_ROOT/input" --authorization "$authorization"
+              git add -- "releases/tsfg-v$TSFG_VERSION/evidence.json" "releases/tsfg-v$TSFG_VERSION/state.json"
+              ;;
+            promote-stable)
+              node tools/manifest-ci.mjs promote-stable --repository . --version "$TSFG_VERSION" \
+                --authorization "$authorization"
+              git add -- default.xml releases/*/state.json
+              ;;
+            finalize-release)
+              node tools/manifest-ci.mjs finalize-release --repository . --version "$TSFG_VERSION" \
+                --metadata "$TSFG_CONTROL_ROOT/input/publication.json" --authorization "$authorization"
+              git add -- "releases/tsfg-v$TSFG_VERSION/publication.json"
+              ;;
+            rollback)
+              node tools/manifest-ci.mjs rollback --repository . \
+                --approval "$TSFG_CONTROL_ROOT/input/rollback.json" --authorization "$authorization"
+              from_version=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1])).fromVersion)' "$TSFG_CONTROL_ROOT/input/rollback.json")
+              git add -- default.xml "releases/tsfg-v$from_version/state.json"
+              ;;
+          esac
+          test -n "$(git diff --cached --name-only)"
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git commit -m "release: $TSFG_OPERATION tsfg-v$TSFG_VERSION"
+          git push origin "HEAD:refs/heads/$branch"
+          printf '%s' "$branch" > "$TSFG_CONTROL_ROOT/branch.txt"
+      - name: Open the protected-main pull request
+        env:
+          GH_TOKEN: ${{ secrets.TSFG_RELEASE_OWNER_TOKEN }}
+          TSFG_CONTROL_ROOT: ${{ runner.temp }}/tsfg-release-owner
+          TSFG_OPERATION: ${{ inputs.operation }}
+          TSFG_VERSION: ${{ inputs.product_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch=$(cat "$TSFG_CONTROL_ROOT/branch.txt")
+          export TSFG_BRANCH="$branch"
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync(process.argv[1], JSON.stringify({
+              base: "main", head: process.env.TSFG_BRANCH,
+              title: `release: ${process.env.TSFG_OPERATION} tsfg-v${process.env.TSFG_VERSION}`,
+              body: `Prepared by protected Release Owner workflow run ${process.env.GITHUB_RUN_ID}.`,
+            }));
+          ' "$TSFG_CONTROL_ROOT/pull-request.json" \
+            </dev/null
+          curl --fail --silent --show-error --location \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls" \
+            --data-binary "@$TSFG_CONTROL_ROOT/pull-request.json"
