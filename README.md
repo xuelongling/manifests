@@ -21,7 +21,7 @@ moving `stable` branch, or a different digest.
 ## Manual Windows installation
 
 Prerequisites are Git for Windows, a `python` command that runs Python 3, HTTPS
-access to the pinned URL above, and a writable per-user tools directory. Run the
+access to the pinned URL above, and a writable E-drive tools directory. Run the
 following PowerShell from this reviewed Manifest Repository checkout. These are
 manual commands; the repository deliberately provides no installer script.
 
@@ -29,6 +29,13 @@ First confirm the prerequisites before creating a launcher:
 
 ```powershell
 $ErrorActionPreference = "Stop"
+
+# Configure before invoking Python or downloading anything. Do not use C: for
+# new tools, workspaces, caches, logs, or temporary data in this workspace.
+$env:TEMP = "E:\tsfg-bootstrap\temp"
+$env:TMP = $env:TEMP
+$env:PYTHONPYCACHEPREFIX = "E:\tsfg-bootstrap\pycache"
+New-Item -ItemType Directory -Path $env:TEMP, $env:PYTHONPYCACHEPREFIX -Force | Out-Null
 
 $pythonVersion = (& python --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $pythonVersion.StartsWith("Python 3.")) {
@@ -38,7 +45,7 @@ if ($LASTEXITCODE -ne 0 -or -not $pythonVersion.StartsWith("Python 3.")) {
 $wrapperSource = (Resolve-Path -LiteralPath ".\repo.cmd").Path
 $repoUrl = "https://storage.googleapis.com/git-repo-downloads/repo-2.65"
 $repoSha256 = "1211b57b57e4122a9c546295a59b37d24068f1164d0e87bef096d5323c413e4f"
-$toolDir = Join-Path $env:LOCALAPPDATA "tsfg\repo\v2.65"
+$toolDir = "E:\tsfg-bootstrap\repo\v2.65"
 $launcherStage = Join-Path $toolDir "repo.py.download"
 $wrapperStage = Join-Path $toolDir "repo.cmd.download"
 $launcherPath = Join-Path $toolDir "repo.py"
@@ -120,7 +127,7 @@ the wrapper appends `--worktree` unless the caller already supplied it. This is
 the required Windows checkout mode:
 
 ```powershell
-$workspace = "C:\work\tsfg-workspace"
+$workspace = "E:\tsfg-workspaces\r00-bootstrap"
 New-Item -ItemType Directory -Path $workspace | Out-Null
 Set-Location -LiteralPath $workspace
 
@@ -210,7 +217,7 @@ node tools/manifest-ci.mjs candidate `
     --repository . `
     --baseline-revision d94f4e6bff9aa980b18b0df94e133559e4b61240 `
     --replacement tsfg.git=<complete-candidate-oid> `
-    --out $env:RUNNER_TEMP\candidate
+    --out E:\tsfg-evidence\candidate
 ```
 
 The output directory contains `candidate-overlay.json`, the fully resolved JSON
