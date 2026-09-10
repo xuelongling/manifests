@@ -90,6 +90,36 @@ test("manifest gate admits a declared versioned source combination without turni
   }
 });
 
+test("manifest gate preserves version 2 exact original upstream paths", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-paths-"));
+  try {
+    const input = await fixture(root);
+    input.admission.schemaVersion = "2";
+    input.admission.sources[0].files[2].path = `tests/${"long-directory/".repeat(10)}original test (case), name with spaces.ts`;
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "preserve original source paths");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("manifest gate binds unmaterialized gitlinks to complete source OIDs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-gitlink-"));
+  try {
+    const input = await fixture(root);
+    input.admission.schemaVersion = "2";
+    input.admission.sources[0].files.push({ contentKind: "gitlink", path: "_submodules/TypeScript", oid: input.admission.sources[0].baseOid });
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "record unmaterialized gitlink");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("manifest gate rejects unrecognized source licenses", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-license-"));
   try {

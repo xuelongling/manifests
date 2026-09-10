@@ -483,9 +483,10 @@ function sourceAdmissionAt(repository, revision, manifestName) {
   return admission;
 }
 
-function requireSourcePath(value, label) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 180 || /[^A-Za-z0-9._/-]/.test(value) ||
-    value.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part) ||
+function requireSourcePath(value, label, originalPaths = false) {
+  if (typeof value !== "string" || value.length === 0 || value.length > (originalPaths ? 4096 : 180) ||
+    (originalPaths ? /[^\x20-\x7e]|[<>:"\\|?*]/ : /[^A-Za-z0-9._/-]/).test(value) ||
+    value.split("/").some((part) => !part || part.length > 255 || part === "." || part === ".." || /[. ]$/.test(part) ||
       /^\.git$/i.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
     throw new ManifestCiError(`${label} is an unsafe source path`);
   }
@@ -493,7 +494,7 @@ function requireSourcePath(value, label) {
 
 function validateSourceAdmission(admission, label) {
   requireExactFields(admission, ["schemaVersion", "sources"], `${label} source admission`);
-  if (admission.schemaVersion !== "1" || !Array.isArray(admission.sources)) throw new ManifestCiError(`${label} source admission version is invalid`);
+  if (!["1", "2"].includes(admission.schemaVersion) || !Array.isArray(admission.sources)) throw new ManifestCiError(`${label} source admission version is invalid`);
   const projects = new Set(["tsfg.git", ".agents.git", "manifests.git"]);
   const paths = new Set(["tsfg", ".agents"]);
   for (const entry of admission.sources) {
@@ -527,13 +528,19 @@ function validateSourceAdmission(admission, label) {
     if (!Array.isArray(entry.files) || entry.files.length === 0) throw new ManifestCiError(`${label} source file mapping is missing`);
     const files = new Set();
     for (const file of entry.files) {
-      requireExactFields(file, ["path", "sha256", "contentKind"], `${label} source file`);
-      requireSourcePath(file.path, label);
+      const gitlink = admission.schemaVersion === "2" && file?.contentKind === "gitlink";
+      requireExactFields(file, gitlink ? ["path", "oid", "contentKind"] : ["path", "sha256", "contentKind"], `${label} source file`);
+      requireSourcePath(file.path, label, admission.schemaVersion === "2");
+      if (files.has(file.path.toLowerCase())) throw new ManifestCiError(`${label} source file mapping is duplicated`);
+      files.add(file.path.toLowerCase());
+      if (gitlink) {
+        requireOid(file.oid, `${label} unmaterialized gitlink`);
+        if (file.oid.length !== 40) throw new ManifestCiError(`${label} gitlink OID must be complete`);
+        continue;
+      }
       if (typeof file.sha256 !== "string" || file.sha256.length !== 71 || /[\x00-\x1f\x7f]/.test(file.sha256)) {
         throw new ManifestCiError(`${label} source file digest must be a complete SHA-256 string`);
       }
-      if (files.has(file.path.toLowerCase())) throw new ManifestCiError(`${label} source file mapping is duplicated`);
-      files.add(file.path.toLowerCase());
       requireDigest(file.sha256, `${label} source file`);
       if (!["text", "binary"].includes(file.contentKind)) throw new ManifestCiError(`${label} source content kind is invalid`);
     }
