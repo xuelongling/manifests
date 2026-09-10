@@ -147,6 +147,7 @@ test("manifest gate rejects unsafe or incomplete source admission records", asyn
       (source) => { source.baseOid = "main"; },
       (source) => { source.branch = "refs/tags/float"; },
       (source) => { source.files[0].contentKind = "unknown"; },
+      (source) => { source.files.push({ path: "bad path.txt", sha256: `sha256:${"a".repeat(64)}`, contentKind: "text" }); },
     ];
     for (const [index, mutate] of mutations.entries()) {
       const admission = structuredClone(input.admission);
@@ -156,6 +157,52 @@ test("manifest gate rejects unsafe or incomplete source admission records", asyn
       const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, `evidence-${index}`));
       assert.equal(result.status, 1, `mutation ${index}: ${result.stderr}`);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("source admission cannot assign the Manifest Repository an upstream role", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-role-"));
+  try {
+    const input = await fixture(root);
+    const source = input.admission.sources[0];
+    source.projectId = "Manifests.git";
+    source.remoteUrl = "https://github.com/xuelongling/Manifests.git";
+    source.canonicalUrl = "https://github.com/upstream/Manifests.git";
+    await writeFile(path.join(input.repository, candidateName), input.candidateXml.replace('name="Fixture.git"', 'name="Manifests.git"'));
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "reserved repository role");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 1, result.stderr);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("source admission rejects a trailing newline in a mapped path without materializing it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-newline-"));
+  try {
+    const input = await fixture(root);
+    input.admission.sources[0].files.push({ path: "unsafe\n", sha256: `sha256:${"a".repeat(64)}`, contentKind: "text" });
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "unsafe mapping string only");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 1, result.stderr);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("source admission requires string identities instead of coercing arrays to OIDs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-string-"));
+  try {
+    const input = await fixture(root);
+    input.admission.sources[0].baseOid = [input.admission.sources[0].baseOid];
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "invalid source identity type");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 1, result.stderr);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
@@ -175,6 +222,7 @@ test("manifest gate consumes candidate-bound source policy evidence without clai
         : JSON.stringify(value);
     const report = {
       schemaVersion: "1", command: "verify-workspace", status: "success", result: {
+        dirty: false,
         manifest: { repositoryUrl: "https://github.com/xuelongling/manifests.git", revision: input.head, selected: candidateName },
         projects: resolved.projects.map((project) => ({ id: project.name, path: project.path, head: project.revision, dirty: false, remote: `https://github.com/xuelongling/${project.name}` })),
         activation: [
@@ -182,6 +230,14 @@ test("manifest gate consumes candidate-bound source policy evidence without clai
         ].map(([source, destination]) => ({ source: `.agents/${source}`, destination, type: "symbolic-link", sha256: `sha256:${"a".repeat(64)}` })),
         policy: {
           upstreamForks: input.admission.sources,
+          repositories: [
+            { id: "manifests", path: ".repo/manifests", files: 1, license: "MIT" },
+            ...resolved.projects.map((project) => ({
+              id: project.name, path: project.path, license: "MIT",
+              files: input.admission.sources.find((source) => source.projectId === project.name)?.files.length ?? 1,
+            })),
+          ],
+          licenseReport: { coverage: { covered: 6, total: 6, percent: "100" }, dependencies: { buildOnly: [], payload: [] }, inputs: [] },
           sourceAdmission: {
             schemaVersion: "1", digest: `sha256:${createHash("sha256").update(canonical(input.admission)).digest("hex")}`,
             sources: input.admission.sources, stages: { sourcePolicy: "passed", generation: "not-run", build: "not-run", interface: "not-run", jsIsolation: "not-run", reproducibility: "not-run" }, intakeComplete: false,
@@ -198,6 +254,8 @@ test("manifest gate consumes candidate-bound source policy evidence without clai
     assert.equal(evidence.status, "passed");
     assert.equal(evidence.stages.build, "not-run");
     const mutations = [
+      (value) => { value.result.dirty = true; },
+      (value) => { delete value.result.dirty; },
       (value) => { value.result.projects[0].remote = "https://example.invalid/wrong.git"; },
       (value) => { value.result.projects[0].dirty = true; },
       (value) => { value.result.activation[0].type = "copy"; },
@@ -207,6 +265,14 @@ test("manifest gate consumes candidate-bound source policy evidence without clai
       (value) => { value.result.policy.sourceAdmission.digest = `sha256:${"0".repeat(64)}`; },
       (value) => { value.result.policy.upstreamForks = []; },
       (value) => { value.result.policy.sourceAdmission.sources = []; },
+      (value) => { delete value.result.policy.licenseReport; },
+      (value) => { value.result.policy.repositories.pop(); },
+      (value) => { value.result.policy.repositories[0].license = "Apache-2.0"; },
+      (value) => { value.result.policy.licenseReport.coverage.covered = 5; },
+      (value) => { value.result.policy.licenseReport.coverage.covered = 5; value.result.policy.licenseReport.coverage.total = 5; },
+      (value) => { delete value.result.policy.licenseReport.inputs; },
+      (value) => { delete value.result.policy.licenseReport.dependencies.buildOnly; },
+      (value) => { value.result.policy.repositories.find((entry) => entry.id === "Fixture.git").files = 1; },
     ];
     for (const [index, mutate] of mutations.entries()) {
       const altered = structuredClone(report);

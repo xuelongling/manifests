@@ -183,7 +183,7 @@ function validateManifest(xml, label, admission = emptySourceAdmission) {
     if (expected.get(project.name) !== project.path) throw new ManifestCiError(`${label} contains an extra or non-canonical R00 project`);
     const source = admission.sources.find((entry) => entry.projectId === project.name);
     if (values.get("remote") !== "github-xuelongling" || values.get("upstream") !== (source?.branch ?? "refs/heads/main")) {
-      throw new ManifestCiError(`${label} project ${project.name} must use the canonical remote and main fetch hint`);
+      throw new ManifestCiError(`${label} project ${project.name} must use the canonical remote and declared fetch hint`);
     }
     if (source && project.revision !== source.forkOid) throw new ManifestCiError(`${label} source revision differs from its admission`);
     if (values.has("clone-depth")) throw new ManifestCiError(`${label} must not request a shallow clone`);
@@ -484,7 +484,7 @@ function sourceAdmissionAt(repository, revision, manifestName) {
 }
 
 function requireSourcePath(value, label) {
-  if (typeof value !== "string" || value.length === 0 || value.length > 180 || /[\\\x00-\x1f\x7f<>:"|?*]/.test(value) ||
+  if (typeof value !== "string" || value.length === 0 || value.length > 180 || /[^A-Za-z0-9._/-]/.test(value) ||
     value.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part) ||
       /^\.git$/i.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
     throw new ManifestCiError(`${label} is an unsafe source path`);
@@ -494,10 +494,14 @@ function requireSourcePath(value, label) {
 function validateSourceAdmission(admission, label) {
   requireExactFields(admission, ["schemaVersion", "sources"], `${label} source admission`);
   if (admission.schemaVersion !== "1" || !Array.isArray(admission.sources)) throw new ManifestCiError(`${label} source admission version is invalid`);
-  const projects = new Set(["tsfg.git", ".agents.git"]);
+  const projects = new Set(["tsfg.git", ".agents.git", "manifests.git"]);
   const paths = new Set(["tsfg", ".agents"]);
   for (const entry of admission.sources) {
     requireExactFields(entry, ["projectId", "path", "remoteUrl", "canonicalUrl", "baseOid", "forkOid", "branch", "license", "files", "legal"], `${label} source`);
+    if ([entry.projectId, entry.path, entry.remoteUrl, entry.canonicalUrl, entry.baseOid, entry.forkOid, entry.branch, entry.license]
+      .some((value) => typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value))) {
+      throw new ManifestCiError(`${label} source identities must be strings without control characters`);
+    }
     requireSourcePath(entry.path, label);
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.path) || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.git$/.test(entry.projectId) ||
       projects.has(entry.projectId.toLowerCase()) || paths.has(entry.path.toLowerCase())) throw new ManifestCiError(`${label} has an unapproved or duplicate source project`);
@@ -509,6 +513,7 @@ function validateSourceAdmission(admission, label) {
     }
     requireOid(entry.baseOid, `${label} upstream base`);
     requireOid(entry.forkOid, `${label} fork commit`);
+    if (entry.baseOid.length !== 40 || entry.forkOid.length !== 40) throw new ManifestCiError(`${label} source OIDs must be exactly 40 characters`);
     if (typeof entry.branch !== "string" || !entry.branch.startsWith("refs/heads/") ||
       spawnSync("git", ["check-ref-format", entry.branch], { encoding: "utf8" }).status !== 0) throw new ManifestCiError(`${label} source branch is not a valid fetch hint`);
     const licenses = [
@@ -524,6 +529,9 @@ function validateSourceAdmission(admission, label) {
     for (const file of entry.files) {
       requireExactFields(file, ["path", "sha256", "contentKind"], `${label} source file`);
       requireSourcePath(file.path, label);
+      if (typeof file.sha256 !== "string" || file.sha256.length !== 71 || /[\x00-\x1f\x7f]/.test(file.sha256)) {
+        throw new ManifestCiError(`${label} source file digest must be a complete SHA-256 string`);
+      }
       if (files.has(file.path.toLowerCase())) throw new ManifestCiError(`${label} source file mapping is duplicated`);
       files.add(file.path.toLowerCase());
       requireDigest(file.sha256, `${label} source file`);
@@ -725,7 +733,7 @@ function requireResolvedWorkspace(report, resolved, candidatePlan, label) {
   })).sort(byId);
   const actualManifest = report.result?.manifest;
   if (
-    !Array.isArray(actualProjects) || canonicalize(actualProjects) !== canonicalize(expectedProjects) ||
+    report.result?.dirty !== false || !Array.isArray(actualProjects) || canonicalize(actualProjects) !== canonicalize(expectedProjects) ||
     actualManifest?.repositoryUrl !== resolved.baseline.repository ||
     actualManifest?.revision !== candidatePlan.manifestRevision ||
     actualManifest?.selected !== candidatePlan.manifest
@@ -741,6 +749,27 @@ function requireResolvedWorkspace(report, resolved, candidatePlan, label) {
       canonicalize(admission.sources) !== canonicalize(expected.sources) || admission.intakeComplete !== false ||
       canonicalize(admission.stages) !== canonicalize(stages) ||
       canonicalize(report.result.policy.upstreamForks) !== canonicalize(expected.sources)) throw new ManifestCiError(`${label} source policy evidence is missing or stale`);
+    const policy = report.result.policy;
+    const byPath = (left, right) => Buffer.from(left.path).compare(Buffer.from(right.path));
+    const expectedRepositories = [
+      { id: "manifests", path: ".repo/manifests" },
+      ...resolved.projects.map((project) => ({ id: project.name, path: project.path })),
+    ].sort(byPath);
+    const repositories = policy.repositories;
+    const repositoryFacts = Array.isArray(repositories)
+      ? repositories.map(({ id, path: repositoryPath }) => ({ id, path: repositoryPath })).sort(byPath) : undefined;
+    const coverage = policy.licenseReport?.coverage;
+    const dependencies = policy.licenseReport?.dependencies;
+    if (!repositoryFacts || canonicalize(repositoryFacts) !== canonicalize(expectedRepositories) ||
+      repositories.some(({ id, files, license }) => {
+        const source = expected.sources.find((entry) => entry.projectId === id);
+        return !Number.isSafeInteger(files) || files < 1 || license !== (source?.license ?? "MIT") ||
+          (source && files !== source.files.length);
+      }) || !Number.isSafeInteger(coverage?.covered) || coverage.covered < 1 || coverage.total !== coverage.covered ||
+      coverage.covered !== repositories.reduce((sum, repository) => sum + repository.files, 0) || coverage.percent !== "100" ||
+      !Array.isArray(dependencies?.buildOnly) || !Array.isArray(dependencies?.payload) || !Array.isArray(policy.licenseReport?.inputs)) {
+      throw new ManifestCiError(`${label} does not contain complete workspace policy evidence`);
+    }
     for (const project of report.result.projects) {
       if (project.remote !== `https://github.com/xuelongling/${project.id}`) throw new ManifestCiError(`${label} project remote is not canonical`);
     }

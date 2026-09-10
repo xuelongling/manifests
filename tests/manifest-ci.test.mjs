@@ -84,6 +84,7 @@ function workspaceReport(candidate, resolved) {
   return {
     command: "verify-workspace",
     result: {
+      dirty: false,
       manifest: {
         repositoryUrl: resolved.baseline.repository,
         revision: candidate.manifestRevision,
