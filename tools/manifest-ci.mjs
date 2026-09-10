@@ -503,7 +503,7 @@ function validateSourceAdmission(admission, label) {
       throw new ManifestCiError(`${label} source identities must be strings without control characters`);
     }
     requireSourcePath(entry.path, label);
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.path) || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.git$/.test(entry.projectId) ||
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.path) || entry.path.startsWith("tsfg-upstream-") || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.git$/.test(entry.projectId) ||
       projects.has(entry.projectId.toLowerCase()) || paths.has(entry.path.toLowerCase())) throw new ManifestCiError(`${label} has an unapproved or duplicate source project`);
     projects.add(entry.projectId.toLowerCase());
     paths.add(entry.path.toLowerCase());

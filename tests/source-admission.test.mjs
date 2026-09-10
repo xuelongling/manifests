@@ -180,6 +180,21 @@ test("source admission cannot assign the Manifest Repository an upstream role", 
   }
 });
 
+test("source admission preserves upstream names without the forbidden tsfg-upstream prefix", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-prefix-"));
+  try {
+    const input = await fixture(root);
+    input.admission.sources[0].path = "tsfg-upstream-fixture";
+    await writeFile(path.join(input.repository, candidateName), input.candidateXml.replace('path="fixture"', 'path="tsfg-upstream-fixture"'));
+    await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(input.admission));
+    const head = commit(input.repository, "forbidden upstream path convention");
+    const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, "evidence"));
+    assert.equal(result.status, 1, result.stderr);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("source admission rejects a trailing newline in a mapped path without materializing it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-newline-"));
   try {
