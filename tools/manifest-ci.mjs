@@ -43,7 +43,8 @@ function requireOid(value, label) {
 }
 
 function git(repository, arguments_, allowFailure = false) {
-  const result = spawnSync("git", ["-C", repository, ...arguments_], { encoding: "utf8" });
+  const result = spawnSync("git", ["-C", repository, ...arguments_], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (result.error) throw new ManifestCiError(`Git inspection failed: ${result.error.message}`);
   if (result.status !== 0 && !allowFailure) {
     throw new ManifestCiError((result.stderr || result.stdout || "git command failed").trim());
   }

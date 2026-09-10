@@ -120,6 +120,29 @@ test("manifest gate binds unmaterialized gitlinks to complete source OIDs", asyn
   }
 });
 
+test("version 2 source mapping still rejects dangerous paths and floating gitlinks", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-v2-invalid-"));
+  try {
+    const input = await fixture(root);
+    input.admission.schemaVersion = "2";
+    for (const [index, extra] of [
+      { contentKind: "gitlink", path: "_submodules/TypeScript", oid: "main" },
+      { ...input.admission.sources[0].files[2], path: "tests/NUL.txt" },
+      { ...input.admission.sources[0].files[2], path: "tests/source:stream" },
+      { ...input.admission.sources[0].files[2], path: "tests/../outside" },
+    ].entries()) {
+      const admission = structuredClone(input.admission);
+      admission.sources[0].files.push(extra);
+      await writeFile(path.join(input.repository, `${candidateName}.sources.json`), JSON.stringify(admission));
+      const head = commit(input.repository, "invalid v2 source fixture");
+      const result = invoke("gate", "--repository", input.repository, "--base", input.base, "--head", head, "--out", path.join(root, `evidence-${index}`));
+      assert.equal(result.status, 1, result.stderr);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("manifest gate rejects unrecognized source licenses", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "tsfg-source-license-"));
   try {

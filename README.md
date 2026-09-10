@@ -47,6 +47,38 @@ This repository has no TypeScript project; its existing static check is
 `node --check tools/manifest-ci.mjs`, not a TypeScript typecheck. Use redirected
 TEMP/TMP and controlled profile/cache paths when running Windows fixtures.
 
+The TypeScript 7.0.2 materialization candidate is `candidates/tsfg-v0.2.0.xml`.
+The filename identifies a candidate record, not a product release or Stable
+Integration. Initialize with the full commit containing that record; never use
+its branch tip as the manifest identity. Its source base is
+`1e4744d68260a7cb91b62b12edc3f6a2187faaf1`; the modified fork OID is recorded
+separately in the XML and source sidecar. The `tsfg-r02a-intake` branch is a
+fetch hint. No existing bootstrap, snapshot, tag or default is changed.
+
+Source admission version `2` preserves explicitly enumerated original ASCII
+paths, including spaces and punctuation, up to 4096 characters with components
+of at most 255 characters. Windows reserved names, forbidden characters,
+traversal, trailing dots/spaces, non-ASCII paths, case collisions and repository
+symlinks remain rejected. First-party path limits remain unchanged. Version `1`
+keeps its original stricter path rules; unknown versions fail closed.
+
+Version `2` additionally records an unmaterialized Git submodule entry as
+`{ "contentKind": "gitlink", "oid": "<full-commit-oid>", "path": "..." }`.
+The product verifier requires its exact tree mode/OID and an absent or empty
+directory. It does not fetch, inspect, approve or consume the referenced source.
+Do not use recursive submodule synchronization for this materialization-only
+candidate. Admission of generation/test sub-sources requires its own declared
+source and consumption evidence. Regular files retain the exact SHA-256 and
+text/binary mapping; upstream legal files remain byte-for-byte intact.
+
+Local candidate preparation may fetch committed objects through explicit
+task-local Git URL transport mappings while retaining canonical configured
+URLs. Record every actual local seed and full OID, and use genuine `repo init`
+and `repo sync`; never synthesize `.repo` project or manifest metadata. Such a
+run proves local materialization of those exact objects, not remote publication
+of the candidate commits. Full source history must be available, and source
+policy success still leaves source rebuilding and Source Intake unrun.
+
 This repository versions Google `repo` orchestration metadata for tsfg. Git,
 Python, and the Google `repo` launcher form the Bootstrap Trust Root used before
 the reproducible build boundary.
