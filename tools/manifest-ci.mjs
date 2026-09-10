@@ -12,6 +12,8 @@ const releaseEnvironment = "protected-release-environment";
 const releaseOwnerWorkflowPath = ".github/workflows/release-owner.yml";
 const bootstrapRevision = "d94f4e6bff9aa980b18b0df94e133559e4b61240";
 const completeOid = /^[0-9a-f]{40}$/;
+const sourceCandidatePath = /^candidates\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/;
+const emptySourceAdmission = { schemaVersion: "1", sources: [] };
 
 class ManifestCiError extends Error {}
 
@@ -139,8 +141,18 @@ function projectsFromManifest(root) {
   return projects;
 }
 
-function validateManifest(xml, label) {
+function validateManifest(xml, label, admission = emptySourceAdmission) {
   const root = parseManifestElements(xml, label);
+  if (admission.sources.length > 0) {
+    const attributes = { manifest: [], remote: ["name", "fetch"], project: ["name", "path", "remote", "revision", "upstream"], linkfile: ["src", "dest"] };
+    const inspect = (node) => {
+      if ([...node.attributes.keys()].some((key) => !attributes[node.name]?.includes(key))) {
+        throw new ManifestCiError(`${label} contains an undeclared ${node.name} attribute`);
+      }
+      node.children.forEach(inspect);
+    };
+    inspect(root);
+  }
   const permittedRootChildren = new Set(["remote", "project"]);
   const unsupported = root.children.find((entry) => !permittedRootChildren.has(entry.name));
   if (unsupported) throw new ManifestCiError(`${label} contains forbidden ${unsupported.name}`);
@@ -158,6 +170,7 @@ function validateManifest(xml, label) {
     ["tsfg.git", "tsfg"],
     [".agents.git", ".agents"],
   ]);
+  for (const source of admission.sources) expected.set(source.projectId, source.path);
   if (projects.length !== expected.size) throw new ManifestCiError(`${label} contains an extra or missing R00 project`);
   const names = new Set();
   const paths = new Set();
@@ -168,15 +181,17 @@ function validateManifest(xml, label) {
     names.add(project.name);
     paths.add(project.path);
     if (expected.get(project.name) !== project.path) throw new ManifestCiError(`${label} contains an extra or non-canonical R00 project`);
-    if (values.get("remote") !== "github-xuelongling" || values.get("upstream") !== "refs/heads/main") {
+    const source = admission.sources.find((entry) => entry.projectId === project.name);
+    if (values.get("remote") !== "github-xuelongling" || values.get("upstream") !== (source?.branch ?? "refs/heads/main")) {
       throw new ManifestCiError(`${label} project ${project.name} must use the canonical remote and main fetch hint`);
     }
+    if (source && project.revision !== source.forkOid) throw new ManifestCiError(`${label} source revision differs from its admission`);
     if (values.has("clone-depth")) throw new ManifestCiError(`${label} must not request a shallow clone`);
     if (projectNodes[index].children.some((entry) => entry.name !== "linkfile" || !entry.selfClosing || entry.children.length !== 0)) {
       throw new ManifestCiError(`${label} project ${project.name} contains a forbidden nested element`);
     }
     const links = projectNodes[index].children.map((entry) => entry.attributes);
-    if (project.name === "tsfg.git" && links.length !== 0) {
+    if (project.name !== ".agents.git" && links.length !== 0) {
       throw new ManifestCiError(`${label} only permits linkfile entries on .agents.git`);
     }
     if (project.name === ".agents.git") {
@@ -249,7 +264,7 @@ async function publishDirectory(destination, files) {
 function manifestPaths(repository, revision) {
   const result = git(repository, ["ls-tree", "-r", "--name-only", revision]);
   return result.stdout.split(/\r?\n/).filter((entry) =>
-    entry === "bootstrap/r00.xml" || entry === "default.xml" || /^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(entry));
+    entry === "bootstrap/r00.xml" || entry === "default.xml" || sourceCandidatePath.test(entry) || /^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(entry));
 }
 
 function requireDefaultSnapshot(repository, revision, defaultXml) {
@@ -263,8 +278,8 @@ function requireDefaultSnapshot(repository, revision, defaultXml) {
 
 function changedManifestPaths(repository, base, head) {
   const result = git(repository, ["diff", "--name-only", `${base}..${head}`]);
-  return result.stdout.split(/\r?\n/).filter((entry) =>
-    entry === "bootstrap/r00.xml" || entry === "default.xml" || entry.startsWith("snapshots/"));
+  return [...new Set(result.stdout.split(/\r?\n/).map((entry) => entry.replace(/\.sources\.json$/, "")).filter((entry) =>
+    entry === "bootstrap/r00.xml" || entry === "default.xml" || sourceCandidatePath.test(entry) || entry.startsWith("snapshots/")))];
 }
 
 function snapshotTree(repository, revision) {
@@ -458,17 +473,82 @@ function validateReleaseHistory(repository, base, head) {
   ) throw new ManifestCiError("default drift is only allowed for a new Owner-approved rollback commit to an earlier Stable");
 }
 
-function resolvedIdentity(baseline, baselineProjects, manifestXml, manifestName, manifestRevision) {
-  const projects = validateManifest(manifestXml, manifestName)
+function sourceAdmissionAt(repository, revision, manifestName) {
+  const source = gitFile(repository, revision, `${manifestName}.sources.json`, true);
+  const admission = source === undefined ? emptySourceAdmission : JSON.parse(source);
+  validateSourceAdmission(admission, manifestName);
+  if (admission.sources.length > 0 && !sourceCandidatePath.test(manifestName)) {
+    throw new ManifestCiError("new sources require an explicitly versioned candidate combination");
+  }
+  return admission;
+}
+
+function requireSourcePath(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 180 || /[\\\x00-\x1f\x7f<>:"|?*]/.test(value) ||
+    value.split("/").some((part) => !part || part === "." || part === ".." || /[. ]$/.test(part) ||
+      /^\.git$/i.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
+    throw new ManifestCiError(`${label} is an unsafe source path`);
+  }
+}
+
+function validateSourceAdmission(admission, label) {
+  requireExactFields(admission, ["schemaVersion", "sources"], `${label} source admission`);
+  if (admission.schemaVersion !== "1" || !Array.isArray(admission.sources)) throw new ManifestCiError(`${label} source admission version is invalid`);
+  const projects = new Set(["tsfg.git", ".agents.git"]);
+  const paths = new Set(["tsfg", ".agents"]);
+  for (const entry of admission.sources) {
+    requireExactFields(entry, ["projectId", "path", "remoteUrl", "canonicalUrl", "baseOid", "forkOid", "branch", "license", "files", "legal"], `${label} source`);
+    requireSourcePath(entry.path, label);
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.path) || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.git$/.test(entry.projectId) ||
+      projects.has(entry.projectId.toLowerCase()) || paths.has(entry.path.toLowerCase())) throw new ManifestCiError(`${label} has an unapproved or duplicate source project`);
+    projects.add(entry.projectId.toLowerCase());
+    paths.add(entry.path.toLowerCase());
+    if (entry.remoteUrl !== `https://github.com/xuelongling/${entry.projectId}` ||
+      !new RegExp(`^https://github\\.com/[A-Za-z0-9][A-Za-z0-9-]*/${entry.projectId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`).test(entry.canonicalUrl)) {
+      throw new ManifestCiError(`${label} source remote or canonical origin is invalid`);
+    }
+    requireOid(entry.baseOid, `${label} upstream base`);
+    requireOid(entry.forkOid, `${label} fork commit`);
+    if (typeof entry.branch !== "string" || !entry.branch.startsWith("refs/heads/") ||
+      spawnSync("git", ["check-ref-format", entry.branch], { encoding: "utf8" }).status !== 0) throw new ManifestCiError(`${label} source branch is not a valid fetch hint`);
+    const licenses = [
+      "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "GPL-2.0-only",
+      "GPL-3.0-or-later WITH GCC-exception-3.1", "LGPL-2.1-or-later AND BSD-3-Clause",
+      "LicenseRef-Debian-glibc-mixed", "LicenseRef-Debian-linux-uapi-mixed", "LicenseRef-Debian-sysroot-mixed",
+      "LicenseRef-Debian-xz-mixed", "LicenseRef-Microsoft-Visual-Cpp-Build-Tools", "LicenseRef-Microsoft-Windows-SDK",
+      "MIT", "Unicode-3.0 AND BSD-3-Clause", "Zlib",
+    ];
+    if (!licenses.includes(entry.license)) throw new ManifestCiError(`${label} source license is unknown`);
+    if (!Array.isArray(entry.files) || entry.files.length === 0) throw new ManifestCiError(`${label} source file mapping is missing`);
+    const files = new Set();
+    for (const file of entry.files) {
+      requireExactFields(file, ["path", "sha256", "contentKind"], `${label} source file`);
+      requireSourcePath(file.path, label);
+      if (files.has(file.path.toLowerCase())) throw new ManifestCiError(`${label} source file mapping is duplicated`);
+      files.add(file.path.toLowerCase());
+      requireDigest(file.sha256, `${label} source file`);
+      if (!["text", "binary"].includes(file.contentKind)) throw new ManifestCiError(`${label} source content kind is invalid`);
+    }
+    requireExactFields(entry.legal, ["license", "notice", "copyright"], `${label} source legal mapping`);
+    for (const file of Object.values(entry.legal)) {
+      if (!entry.files.some((mapped) => mapped.path === file && mapped.contentKind === "text")) throw new ManifestCiError(`${label} source legal material is not mapped`);
+    }
+  }
+}
+
+function resolvedIdentity(baseline, baselineProjects, manifestXml, manifestName, manifestRevision, admission = emptySourceAdmission) {
+  const projects = validateManifest(manifestXml, manifestName, admission)
     .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
   const replacements = projects
-    .filter((project) => baselineProjects.find((entry) => entry.name === project.name)?.revision !== project.revision)
+    .filter((project) => baselineProjects.some((entry) => entry.name === project.name && entry.revision !== project.revision))
     .map(({ name: project, revision }) => ({ project, revision }));
-  if (replacements.length === 0) {
+  if (replacements.length === 0 && admission.sources.length === 0) {
     throw new ManifestCiError("Candidate Overlay must contain at least one effective project revision change");
   }
   const overlay = { baseline, replacements, schemaVersion: "1" };
-  const resolved = { baseline, projects, schemaVersion: "1" };
+  const resolved = admission.sources.length === 0
+    ? { baseline, projects, schemaVersion: "1" }
+    : { baseline, projects, schemaVersion: "2", sourceAdmission: admission };
   const summary = {
     overlayDigest: digest(overlay),
     resolvedManifestDigest: digest(resolved),
@@ -511,6 +591,12 @@ async function gate(options) {
   enforceBootstrapHistory(repository, base, head);
   enforceSnapshotHistory(repository, base, head);
   validateReleaseHistory(repository, base, head);
+  const changedPaths = git(repository, ["diff", "--name-only", `${base}..${head}`]).stdout.split(/\r?\n/).filter(Boolean);
+  for (const changedPath of changedPaths.filter((entry) => entry.startsWith("candidates/"))) {
+    const manifestName = changedPath.replace(/\.sources\.json$/, "");
+    if (!sourceCandidatePath.test(manifestName)) throw new ManifestCiError(`source candidate path must be explicitly versioned: ${changedPath}`);
+    if (gitFile(repository, head, manifestName, true) === undefined) throw new ManifestCiError(`source candidate mapping has no manifest: ${changedPath}`);
+  }
   const treePaths = git(repository, ["ls-tree", "-r", "--name-only", head]).stdout.split(/\r?\n/).filter(Boolean);
   for (const snapshotPath of treePaths.filter((entry) => entry.startsWith("snapshots/"))) {
     if (!/^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(snapshotPath)) {
@@ -518,7 +604,7 @@ async function gate(options) {
     }
   }
   for (const manifestPath of manifestPaths(repository, head)) {
-    validateManifest(gitFile(repository, head, manifestPath), manifestPath);
+    validateManifest(gitFile(repository, head, manifestPath), manifestPath, sourceAdmissionAt(repository, head, manifestPath));
   }
 
   const hasPublishedBootstrap = git(repository, ["cat-file", "-e", `${bootstrapRevision}^{commit}`], true).status === 0;
@@ -544,7 +630,7 @@ async function gate(options) {
     if (manifestPath === "default.xml") continue;
     const xml = gitFile(repository, head, manifestPath, true);
     if (xml === undefined) continue;
-    const identity = resolvedIdentity(baseline, baselineProjects, xml, manifestPath, head);
+    const identity = resolvedIdentity(baseline, baselineProjects, xml, manifestPath, head, sourceAdmissionAt(repository, head, manifestPath));
     candidates.push(identity.plan);
     for (const [name, bytes] of Object.entries(identity.files)) {
       files[`candidates/${identity.plan.id}/${name}`] = bytes;
@@ -556,6 +642,17 @@ async function gate(options) {
     evidenceRetentionDays: "90",
     schemaVersion: "1",
   });
+  if (options.has("--workspace-report")) {
+    if (candidates.length !== 1) throw new ManifestCiError("workspace report requires exactly one changed candidate");
+    const candidate = candidates[0];
+    const resolved = JSON.parse(files[`candidates/${candidate.id}/resolved-manifest.json`]);
+    const report = await readJson(options.get("--workspace-report"), "workspace source policy report");
+    requireResolvedWorkspace(report, resolved, candidate, "workspace source policy report");
+    files["source-policy-verification.json"] = jsonBytes({
+      candidateId: candidate.id, intakeComplete: false, schemaVersion: "1",
+      stages: report.result.policy.sourceAdmission.stages, status: "passed",
+    });
+  }
   await publishDirectory(output, files);
 }
 
@@ -634,6 +731,30 @@ function requireResolvedWorkspace(report, resolved, candidatePlan, label) {
     actualManifest?.selected !== candidatePlan.manifest
   ) {
     throw new ManifestCiError(`${label} is not bound to the resolved Candidate Overlay`);
+  }
+  if (resolved.schemaVersion === "2") {
+    const expected = resolved.sourceAdmission;
+    const admission = report.result?.policy?.sourceAdmission;
+    requireExactFields(admission, ["schemaVersion", "digest", "sources", "stages", "intakeComplete"], `${label} source policy evidence`);
+    const stages = { sourcePolicy: "passed", generation: "not-run", build: "not-run", interface: "not-run", jsIsolation: "not-run", reproducibility: "not-run" };
+    if (admission?.schemaVersion !== "1" || admission.digest !== digest(expected) ||
+      canonicalize(admission.sources) !== canonicalize(expected.sources) || admission.intakeComplete !== false ||
+      canonicalize(admission.stages) !== canonicalize(stages) ||
+      canonicalize(report.result.policy.upstreamForks) !== canonicalize(expected.sources)) throw new ManifestCiError(`${label} source policy evidence is missing or stale`);
+    for (const project of report.result.projects) {
+      if (project.remote !== `https://github.com/xuelongling/${project.id}`) throw new ManifestCiError(`${label} project remote is not canonical`);
+    }
+    const expectedActivation = [
+      { source: ".agents/AGENTS.md", destination: "AGENTS.md" },
+      { source: ".agents/codex/config.toml", destination: ".codex/config.toml" },
+      { source: ".agents/codex/hooks.json", destination: ".codex/hooks.json" },
+    ];
+    const activation = report.result.activation;
+    if (!Array.isArray(activation) || activation.length !== expectedActivation.length ||
+      expectedActivation.some((expectedLink) => !activation.some((link) => link.source === expectedLink.source &&
+        link.destination === expectedLink.destination && link.type === "symbolic-link" && /^sha256:[0-9a-f]{64}$/.test(link.sha256)))) {
+      throw new ManifestCiError(`${label} does not prove the exact Agent Activation Surface`);
+    }
   }
   return report;
 }
@@ -1354,11 +1475,17 @@ function candidateReference(candidatePlan, overlay, summary) {
 
 function validateResolvedCandidateIdentity(candidateId, candidatePlan, overlay, resolved, resolvedXml, summary) {
   const candidate = candidateReference(candidatePlan, overlay, summary);
-  requireFields(resolved, ["baseline", "projects", "schemaVersion"], "resolved manifest");
-  const resolvedProjects = validateManifest(resolvedXml.toString("utf8"), "resolved manifest XML")
+  const isSourceCombination = resolved.schemaVersion === "2";
+  requireFields(resolved, ["baseline", "projects", "schemaVersion", ...(isSourceCombination ? ["sourceAdmission"] : [])], "resolved manifest");
+  const admission = isSourceCombination ? resolved.sourceAdmission : emptySourceAdmission;
+  validateSourceAdmission(admission, "resolved manifest");
+  if (isSourceCombination && (!sourceCandidatePath.test(candidatePlan.manifest) || admission.sources.length === 0)) {
+    throw new ManifestCiError("source combination requires a versioned candidate and declared sources");
+  }
+  const resolvedProjects = validateManifest(resolvedXml.toString("utf8"), "resolved manifest XML", admission)
     .sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
   if (
-    resolved.schemaVersion !== "1" || summary.resolvedManifestDigest !== digest(resolved) ||
+    (!isSourceCombination && resolved.schemaVersion !== "1") || summary.resolvedManifestDigest !== digest(resolved) ||
     summary.resolvedManifestXmlSha256 !== byteDigest(resolvedXml) ||
     summary.resolvedManifestDigest.slice("sha256:".length) !== candidateId ||
     canonicalize(resolved.baseline) !== canonicalize(overlay.baseline) ||
@@ -1366,6 +1493,9 @@ function validateResolvedCandidateIdentity(candidateId, candidatePlan, overlay, 
     resolvedProjects.find((project) => project.name === "tsfg.git")?.revision !== candidatePlan.productRevision ||
     resolvedProjects.find((project) => project.name === ".agents.git")?.revision !== candidatePlan.agentRevision
   ) throw new ManifestCiError("candidate evidence does not bind the resolved manifest identity");
+  if (isSourceCombination && overlay.replacements.some((entry) => admission.sources.some((source) => source.projectId === entry.project))) {
+    throw new ManifestCiError("new source projects must not be represented as Candidate Overlay replacements");
+  }
   return candidate;
 }
 
@@ -1520,8 +1650,11 @@ async function loadVerifiedCandidate(options) {
     throw new ManifestCiError("Candidate provenance requires a complete Manifest Repository clone");
   }
   const sourceManifestXml = gitFile(repository, candidatePlan.manifestRevision, candidatePlan.manifest, true);
+  if (resolved.schemaVersion === "2" && canonicalize(sourceAdmissionAt(repository, candidatePlan.manifestRevision, candidatePlan.manifest)) !== canonicalize(resolved.sourceAdmission)) {
+    throw new ManifestCiError("source admission evidence is detached from the manifest revision");
+  }
   if (
-    !/^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(candidatePlan.manifest) ||
+    (!sourceCandidatePath.test(candidatePlan.manifest) && !/^snapshots\/tsfg-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.xml$/.test(candidatePlan.manifest)) ||
     sourceManifestXml === undefined || !Buffer.from(sourceManifestXml).equals(resolvedXml)
   ) {
     throw new ManifestCiError("resolved Candidate bytes do not match the manifest revision");
@@ -2142,7 +2275,7 @@ async function main() {
     const allowed = new Set(["--repository", "--baseline-revision", "--replacement", "--out"]);
     await candidate(parseOptions(arguments_, allowed, new Set(["--replacement"])));
   } else if (command === "gate") {
-    await gate(parseOptions(arguments_, new Set(["--repository", "--base", "--head", "--out"])));
+    await gate(parseOptions(arguments_, new Set(["--repository", "--base", "--head", "--workspace-report", "--out"])));
   } else if (command === "tag-policy") {
     await tagPolicy(parseOptions(arguments_, new Set(["--before", "--after", "--out"])));
   } else if (command === "verdict") {

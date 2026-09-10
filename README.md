@@ -2,6 +2,51 @@
 
 # tsfg Manifest Repository
 
+## Source admission candidates
+
+New upstream projects enter an explicit `candidates/tsfg-v<semver>.xml` combination.
+Its committed `<manifest-name>.sources.json` sidecar uses schema version `1` and a
+`sources` array. Each source declares `projectId`, `path`, `remoteUrl`,
+`canonicalUrl`, `baseOid`, `forkOid`, `branch`, `license`, `files` and `legal`.
+`files` maps original paths to SHA-256 byte identities and `text`/`binary` content
+kinds; `legal` explicitly maps license, notice and copyright to those text files.
+This small admission mapping is not the later consumption ledger. An empty or
+absent mapping approves no upstream project. Existing bootstrap and snapshot
+combinations retain their original policy; no fixture approves a real dependency.
+
+The manifest gate reads mappings from the exact candidate Git revision, checks
+the complete declared project set and fetch hints, and emits a version `2`
+resolved manifest containing the source admission document. Its content address
+therefore changes with source policy. The version `1` Candidate Overlay still
+only replaces baseline projects; new projects live in the explicit combination.
+An additions-only combination has an empty overlay and a distinct resolved
+identity. `candidate --replacement` never adds projects.
+
+After the Hermetic Build Entry has verified the actual workspace, replay both
+gates with its report (all arguments below are concrete local input paths/OIDs):
+
+```powershell
+node tools/manifest-ci.mjs gate --repository $manifestRepository `
+  --base $baseOid --head $candidateOid --workspace-report $workspaceReport `
+  --out $freshEvidenceDirectory
+```
+
+This mode requires exactly one changed candidate and validates source policy,
+exact projects, clean heads, canonical remotes and the Agent Activation Surface.
+The product verifier checks actual source Git ancestry and original file bytes;
+the manifest consumer requires its admission evidence to match the committed
+sidecar. `source-policy-verification.json` records policy acceptance with
+`intakeComplete: false`; generation, build, interface, JS isolation and
+reproducibility remain `not-run`. It does not produce a Verified Candidate or
+Source Intake completion. Full CI verdicts require their existing evidence lanes
+as well as the same source-policy binding.
+
+Local regression commands are `node --test --test-concurrency=1
+tests/source-admission.test.mjs` and `pwsh -NoProfile -File tests/run.ps1`.
+This repository has no TypeScript project; its existing static check is
+`node --check tools/manifest-ci.mjs`, not a TypeScript typecheck. Use redirected
+TEMP/TMP and controlled profile/cache paths when running Windows fixtures.
+
 This repository versions Google `repo` orchestration metadata for tsfg. Git,
 Python, and the Google `repo` launcher form the Bootstrap Trust Root used before
 the reproducible build boundary.
