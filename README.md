@@ -52,8 +52,15 @@ The filename identifies a candidate record, not a product release or Stable
 Integration. Initialize with the full commit containing that record; never use
 its branch tip as the manifest identity. Its source base is
 `1e4744d68260a7cb91b62b12edc3f6a2187faaf1`; the modified fork OID is recorded
-separately in the XML and source sidecar. The `tsfg-r02a-intake` branch is a
+separately in the XML and source sidecar. The `tsfg-r02a-ast` branch is a
 fetch hint. No existing bootstrap, snapshot, tag or default is changed.
+
+Ticket 04 advances this mutable candidate to the committed minimal AST probe
+and its exact source admission. The product revision is the implementation
+commit used by the recorded local AST execution. This binds a candidate to
+source/build evidence; it does not produce a Verified Candidate, publish any
+remote objects or complete Source Intake. Generator replay and subsequent
+milestones remain separate gates.
 
 Source admission version `2` preserves explicitly enumerated original ASCII
 paths, including spaces and punctuation, up to 4096 characters with components
