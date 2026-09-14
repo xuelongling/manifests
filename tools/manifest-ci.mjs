@@ -669,7 +669,49 @@ async function gate(options) {
       stages: report.result.policy.sourceAdmission.stages, status: "passed",
     });
   }
+  if (options.has("--upgrade-review-report")) {
+    if (candidates.length !== 1) throw new ManifestCiError("upgrade review requires exactly one changed candidate");
+    const report = await readJson(options.get("--upgrade-review-report"), "upgrade governance report");
+    const candidate = candidates[0];
+    const resolved = JSON.parse(files[`candidates/${candidate.id}/resolved-manifest.json`]);
+    files["upgrade-governance.json"] = jsonBytes(requireUpgradeGovernance(report, candidate, resolved,
+      byteDigest(files[`candidates/${candidate.id}/resolved-manifest.xml`])));
+  }
   await publishDirectory(output, files);
+}
+
+function requireUpgradeGovernance(report, candidate, resolved, manifestSha256) {
+  const result = report?.result;
+  const rollback = result?.decision === "rollback-fixture";
+  if (report?.command !== "build" || report.status !== "success" || result?.operation !== "upgrade-review" ||
+      result.schemaVersion !== "1" || result.evidenceKind !== "governance-fixture" || result.intakeComplete !== false ||
+      result.promotionState !== "Candidate" || !["admitted-fixture", "rollback-fixture"].includes(result.decision)) {
+    throw new ManifestCiError("upgrade report must be an admitted governance fixture, never real intake or Stable");
+  }
+  const selected = rollback ? result.rollback : result.integrations?.candidate;
+  if (selected?.revision !== candidate.manifestRevision || selected?.manifest !== candidate.manifest ||
+      selected?.repository !== manifestRepositoryUrl || selected.manifestSha256 !== manifestSha256) {
+    throw new ManifestCiError("upgrade report does not bind the exact manifest candidate");
+  }
+  for (const name of rollback ? ["accepted"] : ["accepted", "candidate"]) {
+    const source = result.sources?.[name], integration = result.integrations?.[name];
+    if (!source || !integration || !result.reviewInputs?.[name]) throw new ManifestCiError("upgrade report lacks source or review identity");
+    for (const category of ["semantics", "diagnostics", "license", "generation", "reproducibility", "performance"]) {
+      const evidence = result.evidence?.[name]?.[category];
+      const expected = category === "performance" && result.performance?.[name]?.claim === null ? "not-applicable" : "passed";
+      if (evidence?.status !== expected || !evidence.reason?.trim() || !evidence.reference?.trim() ||
+          evidence.subject?.forkOid !== source.forkOid || evidence.subject?.manifestRevision !== integration.revision ||
+          evidence.subject?.reviewInputsSha256 !== result.reviewInputs[name]) throw new ManifestCiError("upgrade report lacks required bound evidence");
+    }
+  }
+  const source = result.sources[rollback ? "accepted" : "candidate"];
+  if (canonicalize(resolved.sourceAdmission?.sources.find(entry => entry.projectId === source.projectId)) !== canonicalize(source)) {
+    throw new ManifestCiError("upgrade source approval differs from resolved candidate");
+  }
+  if (!rollback && (result.baseline?.accepted?.language !== result.baseline?.candidate?.language ||
+      result.baseline?.accepted?.engineeringContract !== result.baseline?.candidate?.engineeringContract)) throw new ManifestCiError("upgrade changes fixed commitments");
+  return { schemaVersion: "1", evidenceKind: "governance-fixture", intakeComplete: false, promotionState: "Candidate",
+    candidateId: candidate.id, decision: result.decision, reviewInputSha256: result.inputSha256, evidenceRetentionDays: "90" };
 }
 
 async function readTagMap(filePath, label) {
@@ -2312,7 +2354,7 @@ async function main() {
     const allowed = new Set(["--repository", "--baseline-revision", "--replacement", "--out"]);
     await candidate(parseOptions(arguments_, allowed, new Set(["--replacement"])));
   } else if (command === "gate") {
-    await gate(parseOptions(arguments_, new Set(["--repository", "--base", "--head", "--workspace-report", "--out"])));
+    await gate(parseOptions(arguments_, new Set(["--repository", "--base", "--head", "--workspace-report", "--upgrade-review-report", "--out"])));
   } else if (command === "tag-policy") {
     await tagPolicy(parseOptions(arguments_, new Set(["--before", "--after", "--out"])));
   } else if (command === "verdict") {
