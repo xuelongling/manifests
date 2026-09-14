@@ -708,8 +708,8 @@ function requireUpgradeGovernance(report, candidate, resolved, manifestSha256) {
   if (canonicalize(resolved.sourceAdmission?.sources.find(entry => entry.projectId === source.projectId)) !== canonicalize(source)) {
     throw new ManifestCiError("upgrade source approval differs from resolved candidate");
   }
-  if (result.baseline?.accepted?.language !== result.baseline?.candidate?.language ||
-      result.baseline?.accepted?.engineeringContract !== result.baseline?.candidate?.engineeringContract) throw new ManifestCiError("upgrade changes fixed commitments");
+  if (!rollback && (result.baseline?.accepted?.language !== result.baseline?.candidate?.language ||
+      result.baseline?.accepted?.engineeringContract !== result.baseline?.candidate?.engineeringContract)) throw new ManifestCiError("upgrade changes fixed commitments");
   return { schemaVersion: "1", evidenceKind: "governance-fixture", intakeComplete: false, promotionState: "Candidate",
     candidateId: candidate.id, decision: result.decision, reviewInputSha256: result.inputSha256, evidenceRetentionDays: "90" };
 }

@@ -10,6 +10,8 @@ Exact manifest bytes/OID, source approval, fixed commitments and necessary bound
 evidence must agree. Rejected, stale, incomplete, real-source and Stable-marked
 reports fail. A rollback report must describe the new rollback manifest, with
 passed evidence for the accepted target identity.
+Candidate commitment changes still block upgrade admission; rollback instead
+checks the accepted target and retains the failed candidate's review reasons.
 
 The emitted `upgrade-governance.json` remains a governance fixture receipt with
 `intakeComplete: false` and `promotionState: "Candidate"`. This optional fixture
