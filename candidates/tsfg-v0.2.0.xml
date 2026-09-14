@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 <manifest>
   <remote name="github-xuelongling" fetch="https://github.com/xuelongling/" />
-  <project name="tsfg.git" path="tsfg" remote="github-xuelongling" revision="47dc7232383685748b16af96273b834033a86c6f" upstream="refs/heads/main" />
+  <project name="tsfg.git" path="tsfg" remote="github-xuelongling" revision="347292f4478af24d00e403a27dd1d02b86c3ae43" upstream="refs/heads/main" />
   <project name="TypeScript.git" path="typescript" remote="github-xuelongling" revision="e3f9abe790d77ea46c135f2c4b71afde265563e9" upstream="refs/heads/tsfg-r02a-ast" />
   <project name=".agents.git" path=".agents" remote="github-xuelongling" revision="9753b3ce2d54b67f2aea5b12862a08ad8515e6be" upstream="refs/heads/main">
     <linkfile src="AGENTS.md" dest="AGENTS.md" />
