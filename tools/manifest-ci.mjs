@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { requireRiskRecords } from "./risk-governance.mjs";
 
 const manifestRepositoryUrl = "https://github.com/xuelongling/manifests.git";
 const manifestRepositoryName = "xuelongling/manifests";
@@ -684,7 +685,7 @@ function requireUpgradeGovernance(report, candidate, resolved, manifestSha256) {
   const result = report?.result;
   const rollback = result?.decision === "rollback-fixture";
   if (report?.command !== "build" || report.status !== "success" || result?.operation !== "upgrade-review" ||
-      result.schemaVersion !== "1" || result.evidenceKind !== "governance-fixture" || result.intakeComplete !== false ||
+      result.schemaVersion !== "2" || result.evidenceKind !== "governance-fixture" || result.intakeComplete !== false ||
       result.promotionState !== "Candidate" || !["admitted-fixture", "rollback-fixture"].includes(result.decision)) {
     throw new ManifestCiError("upgrade report must be an admitted governance fixture, never real intake or Stable");
   }
@@ -693,10 +694,21 @@ function requireUpgradeGovernance(report, candidate, resolved, manifestSha256) {
       selected?.repository !== manifestRepositoryUrl || selected.manifestSha256 !== manifestSha256) {
     throw new ManifestCiError("upgrade report does not bind the exact manifest candidate");
   }
+  const riskName = rollback ? "accepted" : "candidate";
+  const risk = result.risks?.[riskName], scope = risk?.coverage, integration = result.integrations?.[riskName];
+  const snapshot = result.replay?.plan?.[riskName];
+  const inputs = snapshot && Object.fromEntries(["declaration", "consumption", "languageBaseline", "engineeringContract", "generationDependencies", "performanceClaim"].map(key => [key, snapshot[key]]));
+  if (risk?.evidenceKind !== "fixture" || risk.decision !== "continue" || !scope?.basis?.trim() ||
+      scope.manifestRevision !== integration?.revision || scope.manifest !== integration?.manifest ||
+      scope.reviewInputsSha256 !== result.reviewInputs?.[riskName] || !inputs || digest(inputs) !== scope.reviewInputsSha256 ||
+      !result.replay.plan.risks?.coverage?.some(entry => canonicalize(entry) === canonicalize(scope))) {
+    throw new ManifestCiError("upgrade risk assessment lacks exact reviewed scope");
+  }
+  requireRiskRecords(result, riskName, resolved.sourceAdmission, digest, canonicalize);
   for (const name of rollback ? ["accepted"] : ["accepted", "candidate"]) {
     const source = result.sources?.[name], integration = result.integrations?.[name];
     if (!source || !integration || !result.reviewInputs?.[name]) throw new ManifestCiError("upgrade report lacks source or review identity");
-    for (const category of ["semantics", "diagnostics", "license", "generation", "reproducibility", "performance"]) {
+    for (const category of ["semantics", "diagnostics", "license", "generation", "reproducibility", "jsIsolation", "performance"]) {
       const evidence = result.evidence?.[name]?.[category];
       const expected = category === "performance" && result.performance?.[name]?.claim === null ? "not-applicable" : "passed";
       if (evidence?.status !== expected || !evidence.reason?.trim() || !evidence.reference?.trim() ||
