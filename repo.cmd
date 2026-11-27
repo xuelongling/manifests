@@ -2,6 +2,8 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
+if /I "%~1"=="link-workspace" goto link_workspace
+
 if not exist "%~dp0repo.py" (
     >&2 echo ERROR: repo.py is missing next to repo.cmd. Repeat the verified manual installation from the Manifest Repository README.
     exit /b 2
@@ -66,3 +68,18 @@ exit /b %errorlevel%
 call python "%~dp0repo.py" %* %repo_default%
 
 exit /b %errorlevel%
+
+:link_workspace
+if not "%~3"=="" goto link_workspace_usage
+set "workspace_migrate="
+if /I "%~2"=="--migrate" set "workspace_migrate=-Migrate"
+if not "%~2"=="" if not defined workspace_migrate goto link_workspace_usage
+set "workspace_shell=powershell.exe"
+where.exe pwsh.exe >nul 2>&1
+if not errorlevel 1 set "workspace_shell=pwsh.exe"
+%workspace_shell% -NoProfile -File "%CD%\.repo\manifests\tools\link-workspace.ps1" -WorkspaceRoot "%CD%" %workspace_migrate%
+exit /b %errorlevel%
+
+:link_workspace_usage
+>&2 echo Usage: repo.cmd link-workspace [--migrate]
+exit /b 2

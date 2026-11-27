@@ -2,6 +2,20 @@
 
 # tsfg Manifest Repository
 
+## Workspace links for the tcfg development checkout
+
+From the workspace root, run `& .\.repo\manifests\repo.cmd link-workspace`
+after checking out `tcfg` and this manifest repository. This workspace hook
+links `AGENTS.md`, `CONTEXT-MAP.md` and `docs` to their counterparts under
+`tcfg`. Run it again to restore missing links after moving to a new machine.
+On Windows, use PowerShell 7 with Developer Mode enabled or run the command
+in a shell with permission to create symbolic links.
+
+For a workspace that still has ordinary files at those root paths, run the
+same command with `--migrate`. Root files take precedence on name conflicts.
+The hook merges directories and creates links after retaining the files in
+`tcfg`. The pinned R00 bootstrap continues to use its own activation layout.
+
 ## Source admission candidates
 
 New upstream projects enter an explicit `candidates/tsfg-v<semver>.xml` combination.
